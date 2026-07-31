@@ -1,0 +1,36 @@
+from datetime import datetime
+
+import frappe
+from frappe.utils import now_datetime
+
+
+def get_eligible_accounts(exclude=None):
+	filters = {"status": "Active"}
+	accounts = frappe.get_all(
+		"WhatsApp Account",
+		filters=filters,
+		fields=["name", "priority", "last_used", "daily_message_count", "daily_limit"],
+	)
+	exclude = exclude or []
+	return [a for a in accounts if a.name not in exclude and a.daily_message_count < a.daily_limit]
+
+
+def pick_account(exclude=None):
+	eligible = get_eligible_accounts(exclude=exclude)
+	if not eligible:
+		return None
+
+	strategy = frappe.get_cached_value("WhatsApp Settings", "WhatsApp Settings", "routing_strategy") or "Round Robin"
+
+	if strategy == "Priority":
+		eligible.sort(key=lambda a: a.priority or 0)
+	else:
+		eligible.sort(key=lambda a: a.last_used or datetime.min)
+
+	chosen = eligible[0]
+	frappe.db.set_value("WhatsApp Account", chosen.name, "last_used", now_datetime())
+	return chosen.name
+
+
+def pick_failover_account(failed_account):
+	return pick_account(exclude=[failed_account])

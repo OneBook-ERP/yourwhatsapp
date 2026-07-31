@@ -1,0 +1,68 @@
+{
+    "name": "WhatsApp Settings",
+    "module": "Yourwhatsapp",
+    "doctype": "DocType",
+    "engine": "InnoDB",
+    "issingle": 1,
+    "fields": [
+        {
+            "fieldname": "default_incoming_account",
+            "fieldtype": "Link",
+            "label": "Default Incoming Account",
+            "options": "WhatsApp Account"
+        },
+        {
+            "fieldname": "default_outgoing_account",
+            "fieldtype": "Link",
+            "label": "Default Outgoing Account",
+            "options": "WhatsApp Account"
+        },
+        {
+            "fieldname": "column_break_defaults",
+            "fieldtype": "Column Break"
+        },
+        {
+            "fieldname": "routing_strategy",
+            "fieldtype": "Select",
+            "label": "Routing Strategy",
+            "options": "Round Robin\nPriority",
+            "default": "Round Robin"
+        },
+        {
+            "fieldname": "section_break_relay",
+            "fieldtype": "Section Break",
+            "label": "Relay Connection"
+        },
+        {
+            "fieldname": "relay_base_url",
+            "fieldtype": "Data",
+            "label": "Relay Base URL",
+            "description": "e.g. http://localhost:8800"
+        },
+        {
+            "fieldname": "column_break_relay",
+            "fieldtype": "Column Break"
+        },
+        {
+            "fieldname": "relay_api_key",
+            "fieldtype": "Password",
+            "label": "Relay API Key"
+        }
+    ],
+    "permissions": [
+        {
+            "role": "System Manager",
+            "read": 1,
+            "write": 1
+        },
+        {
+            "role": "WhatsApp Admin",
+            "read": 1,
+            "write": 1
+        },
+        {
+            "role": "Sales Manager",
+            "read": 1
+        }
+    ]
+}

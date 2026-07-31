@@ -1,0 +1,67 @@
+{
+    "name": "WhatsApp Templates",
+    "module": "Yourwhatsapp",
+    "doctype": "DocType",
+    "engine": "InnoDB",
+    "autoname": "field:template_name",
+    "naming_rule": "By fieldname",
+    "sort_field": "modified",
+    "sort_order": "DESC",
+    "fields": [
+        {
+            "fieldname": "template_name",
+            "fieldtype": "Data",
+            "label": "Template Name",
+            "reqd": 1,
+            "unique": 1,
+            "in_list_view": 1
+        },
+        {
+            "fieldname": "header",
+            "fieldtype": "Data",
+            "label": "Header"
+        },
+        {
+            "fieldname": "template",
+            "fieldtype": "Text",
+            "label": "Template",
+            "reqd": 1,
+            "description": "Use {{1}}, {{2}}, ... as placeholders"
+        },
+        {
+            "fieldname": "footer",
+            "fieldtype": "Data",
+            "label": "Footer"
+        }
+    ],
+    "permissions": [
+        {
+            "role": "System Manager",
+            "read": 1,
+            "write": 1,
+            "create": 1,
+            "delete": 1
+        },
+        {
+            "role": "WhatsApp Admin",
+            "read": 1,
+            "write": 1,
+            "create": 1,
+            "delete": 1
+        },
+        {
+            "role": "WhatsApp Operator",
+            "read": 1
+        },
+        {
+            "role": "Sales Manager",
+            "read": 1,
+            "write": 1,
+            "create": 1
+        },
+        {
+            "role": "Sales User",
+            "read": 1
+        }
+    ]
+}

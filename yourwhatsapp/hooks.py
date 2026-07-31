@@ -149,23 +149,11 @@ app_license = "mit"
 # Scheduled Tasks
 # ---------------
 
-# scheduler_events = {
-# 	"all": [
-# 		"yourwhatsapp.tasks.all"
-# 	],
-# 	"daily": [
-# 		"yourwhatsapp.tasks.daily"
-# 	],
-# 	"hourly": [
-# 		"yourwhatsapp.tasks.hourly"
-# 	],
-# 	"weekly": [
-# 		"yourwhatsapp.tasks.weekly"
-# 	],
-# 	"monthly": [
-# 		"yourwhatsapp.tasks.monthly"
-# 	],
-# }
+scheduler_events = {
+	"daily": [
+		"yourwhatsapp.yourwhatsapp.tasks.reset_daily_message_counts"
+	],
+}
 
 # Testing
 # -------

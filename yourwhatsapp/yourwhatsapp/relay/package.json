@@ -1,0 +1,16 @@
+{
+  "name": "yourwhatsapp-relay",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Self-hosted WhatsApp relay for the yourwhatsapp Frappe app (whatsapp-web.js backed)",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "whatsapp-web.js": "^1.34.7",
+    "qrcode": "^1.5.4",
+    "axios": "^1.7.9"
+  }
+}
