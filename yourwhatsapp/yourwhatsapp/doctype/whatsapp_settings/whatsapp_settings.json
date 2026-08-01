@@ -47,6 +47,12 @@
             "fieldname": "relay_api_key",
             "fieldtype": "Password",
             "label": "Relay API Key"
+        },
+        {
+            "fieldname": "relay_reachable_frappe_url",
+            "fieldtype": "Data",
+            "label": "Frappe URL (reachable from relay)",
+            "description": "Base URL of this Frappe site as reachable FROM the relay process — not necessarily the same as the site's public URL. E.g. custom .localhost domains often don't resolve from Node's DNS resolver even though they work in a browser; use http://127.0.0.1:<port> instead in that case."
         }
     ],
     "permissions": [

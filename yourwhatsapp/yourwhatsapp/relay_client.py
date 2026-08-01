@@ -4,7 +4,7 @@ from frappe.utils import now_datetime
 
 from yourwhatsapp.yourwhatsapp.routing import pick_failover_account
 
-TIMEOUT = 15
+TIMEOUT = 45  # media uploads through a loaded headless browser can take longer than a plain text send
 
 
 def relay_settings():
@@ -12,6 +12,33 @@ def relay_settings():
 	if not settings.relay_base_url:
 		raise RelayNotConfigured("WhatsApp Settings: Relay Base URL is not configured")
 	return settings.relay_base_url.rstrip("/"), settings.get_password("relay_api_key")
+
+
+def _attach_payload(doc):
+	if not doc.attach:
+		return {}
+
+	# Read and base64-encode the file directly instead of handing the relay a
+	# URL to fetch: private files (the CRM/Frappe default for user uploads)
+	# aren't reachable by an anonymous HTTP GET from the relay's Node process,
+	# and even public-file URLs hit the .localhost-DNS-resolution gotcha. This
+	# sidesteps both — the relay never needs network access to Frappe at all
+	# for the attachment itself, only bytes we hand it directly.
+	import mimetypes
+
+	file_doc = frappe.get_doc("File", {"file_url": doc.attach})
+	content = file_doc.get_content()
+	if isinstance(content, str):
+		content = content.encode("utf-8")
+
+	import base64
+
+	mimetype = mimetypes.guess_type(file_doc.file_name)[0] or "application/octet-stream"
+	return {
+		"attach_base64": base64.b64encode(content).decode("ascii"),
+		"attach_mimetype": mimetype,
+		"attach_filename": file_doc.file_name,
+	}
 
 
 class RelayNotConfigured(Exception):
@@ -56,8 +83,8 @@ def _dispatch(doc, attempted_accounts=None):
 			"to": doc.to,
 			"content_type": doc.content_type,
 			"message": _render_message(doc),
-			"attach_url": frappe.utils.get_url(doc.attach) if doc.attach else None,
 			"local_message_id": doc.name,
+			**_attach_payload(doc),
 		}
 		response = requests.post(
 			f"{base_url}/message/send",

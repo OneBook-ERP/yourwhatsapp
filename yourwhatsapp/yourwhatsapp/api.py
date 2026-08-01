@@ -19,6 +19,9 @@ def inbound_message(
 	attach_url: str | None = None,
 	is_reply: bool = False,
 	reply_to_message_id: str | None = None,
+	media_base64: str | None = None,
+	media_mimetype: str | None = None,
+	media_filename: str | None = None,
 ):
 	_verify_relay_key()
 
@@ -41,7 +44,34 @@ def inbound_message(
 		}
 	)
 	doc.insert(ignore_permissions=True)
+
+	if media_base64:
+		_save_inbound_media(doc.name, media_base64, media_mimetype, media_filename)
+
 	return {"name": doc.name}
+
+
+def _save_inbound_media(message_name: str, media_base64: str, mimetype: str | None, filename: str | None):
+	import base64
+	import mimetypes
+
+	content = base64.b64decode(media_base64)
+	if not filename:
+		ext = mimetypes.guess_extension(mimetype or "") or ""
+		filename = f"{message_name}{ext}"
+
+	file_doc = frappe.get_doc(
+		{
+			"doctype": "File",
+			"file_name": filename,
+			"attached_to_doctype": "WhatsApp Message",
+			"attached_to_name": message_name,
+			"content": content,
+			"decode": False,
+		}
+	)
+	file_doc.save(ignore_permissions=True)
+	frappe.db.set_value("WhatsApp Message", message_name, "attach", file_doc.file_url)
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])

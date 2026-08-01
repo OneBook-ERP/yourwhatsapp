@@ -19,7 +19,10 @@ process.on("uncaughtException", (err) => {
 });
 
 const app = express();
-app.use(express.json());
+// Base64-encoded media attachments inflate ~33% over raw size; express's 100kb
+// default body limit rejects any real image/video/PDF outright. 25mb covers
+// WhatsApp's own ~16MB media cap with headroom.
+app.use(express.json({ limit: "25mb" }));
 
 app.use((req, res, next) => {
 	if (req.headers["x-api-key"] !== RELAY_API_KEY) {
@@ -48,12 +51,15 @@ app.post("/session/:id/resume", (req, res) => {
 });
 
 app.post("/message/send", async (req, res) => {
-	const { session_id, to, content_type, message, attach_url } = req.body;
+	const { session_id, to, content_type, message, attach_base64, attach_mimetype, attach_filename } = req.body;
 	if (!session_id || !to) {
 		return res.status(400).json({ error: "session_id and to are required" });
 	}
+	const attach = attach_base64
+		? { base64: attach_base64, mimetype: attach_mimetype, filename: attach_filename }
+		: null;
 	try {
-		const message_id = await sessionManager.sendMessage(session_id, to, message, content_type, attach_url);
+		const message_id = await sessionManager.sendMessage(session_id, to, message, content_type, attach);
 		res.json({ message_id });
 	} catch (err) {
 		console.error("[relay] /message/send failed:", err.stack || err.message);

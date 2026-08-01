@@ -8,6 +8,24 @@ const SESSIONS_DIR = path.join(__dirname, ".sessions");
 // session_id -> { client, status }
 const sessions = new Map();
 
+// WhatsApp's July 2026 Web update renamed the internal serialized-id getter
+// from `_serialized` to `$1` on message/chat id objects. whatsapp-web.js
+// 1.34.7 still reads `._serialized` internally (e.g. inside downloadMedia()),
+// which is now undefined — breaking media download, ack tracking, and any
+// other id-dependent call. Backfill it wherever an id object enters our code
+// so both our own reads and the library's internal reads see a real value.
+// Remove once upstream ships a fix (tracked: wwebjs/whatsapp-web.js#201833).
+function serializedId(id) {
+	return id?._serialized ?? id?.$1 ?? null;
+}
+
+function patchSerializedId(id) {
+	if (id && id._serialized == null && id.$1 != null) {
+		id._serialized = id.$1;
+	}
+	return id;
+}
+
 // WhatsApp increasingly addresses contacts by a privacy-preserving "lid" (Linked ID)
 // instead of their real phone number JID. Resolve it back to a phone number when possible.
 async function resolvePhoneNumber(client, waId) {
@@ -63,13 +81,30 @@ function buildClient(sessionId) {
 
 	client.on("message", async (msg) => {
 		if (msg.fromMe) return;
+		patchSerializedId(msg.id);
+
+		let media = null;
+		if (msg.hasMedia) {
+			try {
+				media = await msg.downloadMedia();
+				if (!media) {
+					console.error(`[relay] downloadMedia returned empty for message ${serializedId(msg.id)}, type=${msg.type}`);
+				}
+			} catch (err) {
+				console.error(`[relay] downloadMedia failed for message ${serializedId(msg.id)}, type=${msg.type}:`, err.message);
+			}
+		}
+
 		await frappeClient.inboundMessage({
 			session_id: sessionId,
 			from_number: await resolvePhoneNumber(client, msg.from),
 			content_type: contentTypeFromMessage(msg),
 			message: msg.body,
-			message_id: msg.id._serialized,
+			message_id: serializedId(msg.id),
 			is_reply: !!msg.hasQuotedMsg,
+			media_base64: media?.data ?? null,
+			media_mimetype: media?.mimetype ?? null,
+			media_filename: media?.filename ?? null,
 		});
 	});
 
@@ -77,7 +112,7 @@ function buildClient(sessionId) {
 		// ack: -1 error, 1 sent to server, 2 delivered, 3 read
 		const statusMap = { "-1": "Failed", 1: "Sent", 2: "Delivered", 3: "Read" };
 		const status = statusMap[String(ack)];
-		const messageId = msg?.id?._serialized;
+		const messageId = serializedId(msg?.id);
 		if (status && messageId) {
 			await frappeClient.messageStatus(messageId, status);
 		}
@@ -163,22 +198,25 @@ function resumeSession(sessionId) {
 	return startSession(sessionId);
 }
 
-async function sendMessage(sessionId, to, message, contentType, attachUrl) {
+async function sendMessage(sessionId, to, message, contentType, attach) {
 	const entry = sessions.get(sessionId);
 	if (!entry || entry.status !== "connected") {
 		throw new Error(`Session ${sessionId} is not connected`);
 	}
 	const chatId = to.includes("@c.us") ? to : `${to}@c.us`;
 
-	if (contentType && contentType !== "text" && attachUrl) {
-		const media = await MessageMedia.fromUrl(attachUrl, { unsafeMime: true });
+	if (contentType && contentType !== "text" && attach?.base64) {
+		// Built from raw bytes Frappe already read and encoded — no fetch by
+		// the relay itself, so this works regardless of the file's privacy
+		// setting or whether its URL is reachable from this process.
+		const media = new MessageMedia(attach.mimetype, attach.base64, attach.filename);
 		const sent = await entry.client.sendMessage(chatId, media, { caption: message || undefined });
 		// wwebjs can resolve without a Message object even though the send itself succeeded
-		return sent?.id?._serialized ?? null;
+		return serializedId(sent?.id);
 	}
 
 	const sent = await entry.client.sendMessage(chatId, message);
-	return sent?.id?._serialized ?? null;
+	return serializedId(sent?.id);
 }
 
 module.exports = { startSession, getStatus, pauseSession, resumeSession, sendMessage };
