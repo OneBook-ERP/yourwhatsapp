@@ -7,7 +7,7 @@ from yourwhatsapp.yourwhatsapp.routing import pick_failover_account
 TIMEOUT = 15
 
 
-def _relay_settings():
+def relay_settings():
 	settings = frappe.get_single("WhatsApp Settings")
 	if not settings.relay_base_url:
 		raise RelayNotConfigured("WhatsApp Settings: Relay Base URL is not configured")
@@ -50,7 +50,7 @@ def _dispatch(doc, attempted_accounts=None):
 	account = frappe.get_doc("WhatsApp Account", doc.whatsapp_account)
 
 	try:
-		base_url, api_key = _relay_settings()
+		base_url, api_key = relay_settings()
 		payload = {
 			"session_id": account.session_id,
 			"to": doc.to,

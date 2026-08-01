@@ -80,15 +80,42 @@ def update_qr(session_id: str, qr_base64: str | None = None, status: str | None 
 def _save_qr_image(account: str, qr_base64: str):
 	import base64
 
+	file_name = f"{account}-qr.png"
+	content = base64.b64decode(qr_base64)
+
+	# QR codes rotate every ~20-30s until scanned. Frappe's File doctype only
+	# writes the physical file on insert (before_insert), never on update — so
+	# updating an existing File doc's `content` and saving silently leaves the
+	# old bytes on disk. Delete the previous File first so the reinsert keeps
+	# the same filename (no collision, no auto-suffix) instead of piling up.
+	existing = frappe.db.get_value(
+		"File",
+		{"attached_to_doctype": "WhatsApp Account", "attached_to_name": account, "file_name": file_name},
+	)
+	if existing:
+		try:
+			frappe.delete_doc("File", existing, ignore_permissions=True, delete_permanently=True)
+		except Exception:
+			# Transient lock from a near-simultaneous QR event — fall through and
+			# insert anyway; Frappe will auto-suffix the filename this one time
+			# rather than dropping the update entirely.
+			pass
+
 	file_doc = frappe.get_doc(
 		{
 			"doctype": "File",
-			"file_name": f"{account}-qr.png",
+			"file_name": file_name,
 			"attached_to_doctype": "WhatsApp Account",
 			"attached_to_name": account,
-			"content": base64.b64decode(qr_base64),
+			"content": content,
 			"decode": False,
 		}
 	)
 	file_doc.save(ignore_permissions=True)
-	frappe.db.set_value("WhatsApp Account", account, "qr_code", file_doc.file_url)
+
+	# Cache-bust: the file URL is otherwise identical across QR rotations (same
+	# reused File record), so browsers serve the stale cached image instead of
+	# re-fetching the updated content.
+	frappe.db.set_value(
+		"WhatsApp Account", account, "qr_code", f"{file_doc.file_url}?t={int(frappe.utils.now_datetime().timestamp())}"
+	)

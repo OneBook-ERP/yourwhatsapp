@@ -77,8 +77,9 @@ function buildClient(sessionId) {
 		// ack: -1 error, 1 sent to server, 2 delivered, 3 read
 		const statusMap = { "-1": "Failed", 1: "Sent", 2: "Delivered", 3: "Read" };
 		const status = statusMap[String(ack)];
-		if (status) {
-			await frappeClient.messageStatus(msg.id._serialized, status);
+		const messageId = msg?.id?._serialized;
+		if (status && messageId) {
+			await frappeClient.messageStatus(messageId, status);
 		}
 	});
 
@@ -103,27 +104,31 @@ function pollStateFallback(sessionId) {
 		}
 		try {
 			const state = await entry.client.getState();
-			if (state === "CONNECTED") {
-				// wwebjs's internal 'ready' flow (which wires up message/ack listeners)
-				// can hang indefinitely even once the socket is actually connected —
-				// attach listeners ourselves so inbound messages still fire. The critical
-				// Msg.on('add', ...) subscription is near the end of attachEventListeners,
-				// so a mid-sequence "binding already exists" error (from a partial earlier
-				// attempt) aborts before it registers — retry so a clean pass gets through.
-				for (let attempt = 1; attempt <= 3; attempt++) {
-					try {
-						await entry.client.attachEventListeners();
-						break;
-					} catch (err) {
-						console.error(
-							`[relay] attachEventListeners attempt ${attempt} failed for ${sessionId}:`,
-							err.message,
-						);
-					}
-				}
-				await markConnected(sessionId);
-				clearInterval(interval);
+			if (state !== "CONNECTED") return;
+
+			// WhatsApp Web reloads the page right after a device links, which tears
+			// down window.WWebJS (wwebjs's injected bridge) until the reload settles.
+			// Calling attachEventListeners() before it's back throws "Cannot read
+			// properties of undefined (reading 'injectToFunction')" and can collide
+			// with wwebjs's own in-flight injection, destroying its execution context.
+			// Confirm the bridge is actually present first — cheap, side-effect-free.
+			const bridgeReady = await entry.client.pupPage
+				.evaluate(() => typeof window.WWebJS !== "undefined")
+				.catch(() => false);
+			if (!bridgeReady) return;
+
+			// wwebjs's internal 'ready' flow (which wires up message/ack listeners)
+			// can hang indefinitely even once the socket is actually connected and
+			// the bridge is present — attach listeners ourselves so inbound messages
+			// still fire. Only try once per tick (5s apart); keep polling until it lands.
+			try {
+				await entry.client.attachEventListeners();
+			} catch (err) {
+				console.error(`[relay] attachEventListeners failed for ${sessionId}, will retry:`, err.message);
+				return;
 			}
+			await markConnected(sessionId);
+			clearInterval(interval);
 		} catch {
 			// page not ready yet, keep polling
 		}
