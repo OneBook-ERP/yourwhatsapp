@@ -49,25 +49,14 @@ Pairing: create a `WhatsApp Account`, then either click **Connect / Generate QR*
 - **Killing the relay Node process does not kill its Chromium children** — always `pkill`/kill the `chromium-headless-shell` processes under `relay/.sessions/session-<id>/` too, or you'll get orphaned browsers holding the profile lock and blocking reconnection.
 - **Repeated hard kills of a connected session can get the device unlinked by WhatsApp itself** (abrupt-disconnect abuse protection) — don't casually SIGKILL a live, working session; restart the relay gracefully when possible.
 - **whatsapp-web.js's default user-agent is hardcoded and outdated** (`Chrome/101.0.4951.67`, identical across every deployment of the library worldwide) — a known fingerprintable pattern. See anti-ban notes.
+- **`whatsapp-web.js` 1.34.7's `message.id._serialized` is `undefined`** as of WhatsApp's July 2026 Web update — WhatsApp renamed the internal getter to `id.$1`, and the installed library version hasn't caught up. This silently broke `downloadMedia()` (opaque `r: r` error), outgoing `message_id` tracking, and ack status updates. `session_manager.js` backfills `_serialized` from `$1` via `patchSerializedId()`/`serializedId()` wherever an id object enters our code. Remove once upstream ships a fix ([wwebjs/whatsapp-web.js#201833](https://github.com/wwebjs/whatsapp-web.js/issues/201833)).
+- **Never hand the relay a URL to fetch for outgoing attachments.** User-uploaded files default to private in Frappe (`/private/files/...`), which an anonymous fetch from the relay's Node process can't read — and even public files hit the `.localhost` DNS gotcha above. `relay_client.py` reads the file directly via `File.get_content()` and sends it base64-encoded instead; the relay builds a `MessageMedia` object from bytes, no fetch involved.
+- **Express's default JSON body limit (100kb) silently rejects real media** once base64-encoded (~33% size inflation). `server.js` sets it to 25mb.
 
-## Anti-ban (production readiness — not yet fully implemented, tracked as pending work)
+## Anti-ban
 
-No self-hosted/unofficial client setup is "ban-proof" — this is risk *reduction*, not immunity, and must never be marketed otherwise (compliance requirement from the original spec). Open items:
-
-- Fix the hardcoded default UA (shared across every whatsapp-web.js install, outdated).
-- IP diversity per number — all accounts currently share one relay host/IP, a known farm-detection signal.
-- Reduce headless/puppeteer fingerprint distinctiveness.
-- Number provisioning: real SIM-registered numbers, gradual volume warm-up per new number.
-- Enforce per-number daily send caps (`daily_limit` field exists, not yet a hard stop) + randomized inter-send delay.
-- Avoid identical bulk-blast content across numbers/contacts once trigger-based messaging (phase 2) exists.
-- Health scoring + auto-pause *before* a number gets banned, not after (spec's "Sender Health and Protection Controls" — still unbuilt).
-- Cooldown/auto-recovery timer for accounts stuck in `RateLimited` status.
-
-## Known bugs in progress
-
-- Outbound media (image/video/document) send — fixed: was using `frappe.utils.get_url()` which returns a `.localhost` URL Node can't resolve; now uses `relay_reachable_frappe_url` from `WhatsApp Settings`.
-- Inbound media — fixed: `session_manager.js`'s message handler now calls `msg.downloadMedia()` and `api.py`'s `inbound_message` saves it as a `File` attached to the new `WhatsApp Message`. Needs relay restart + live retest to confirm.
+No self-hosted/unofficial client setup is "ban-proof" — this is risk *reduction*, not immunity, and must never be marketed otherwise (compliance requirement from the original spec). Full task list, in detail, lives in `ROADMAP.md` (Phase 3) — don't duplicate it here, that file is the source of truth.
 
 ## Phase status
 
-Phase 1 (foundation — accounts, routing/failover, relay, CRM integration, send/receive) is built and verified against real WhatsApp numbers. Phase 2 (trigger-based auto-messaging, health/protection controls, ops dashboard, audit trail) is not yet started — trigger-based auto-messaging was chosen as the next priority, but anti-ban and media bugs took precedence once real-number testing surfaced them.
+See `ROADMAP.md` for the full phase-by-phase breakdown with objectives and detailed task lists. Short version: Phase 1 (foundation) and Phase 1.5 (hardening — media send/receive, private files, several real relay/wwebjs bugs) are done and verified against real WhatsApp numbers. Phase 2 (trigger-based auto-messaging) is chosen as next priority but not started.
