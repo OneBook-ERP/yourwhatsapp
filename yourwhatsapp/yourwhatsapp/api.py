@@ -68,6 +68,9 @@ def _save_inbound_media(message_name: str, media_base64: str, mimetype: str | No
 			"attached_to_name": message_name,
 			"content": content,
 			"decode": False,
+			# Customer-sent media (IDs, invoices, photos) must not be readable by
+			# anyone holding the URL — private files are permission-checked.
+			"is_private": 1,
 		}
 	)
 	file_doc.save(ignore_permissions=True)
@@ -102,6 +105,9 @@ def update_qr(session_id: str, qr_base64: str | None = None, status: str | None 
 		frappe.db.set_value("WhatsApp Account", account, "status", status)
 		if status == "Active":
 			frappe.db.set_value("WhatsApp Account", account, "connected_at", now_datetime())
+			# A scanned QR is spent, and a leftover one is only a liability.
+			_delete_qr_image(account)
+			frappe.db.set_value("WhatsApp Account", account, "qr_code", None)
 
 	if qr_base64:
 		_save_qr_image(account, qr_base64)
@@ -109,10 +115,33 @@ def update_qr(session_id: str, qr_base64: str | None = None, status: str | None 
 	return {"ok": True}
 
 
+def qr_file_name(account: str) -> str:
+	return f"{account}-qr.png"
+
+
+def _delete_qr_image(account: str):
+	existing = frappe.db.get_value(
+		"File",
+		{
+			"attached_to_doctype": "WhatsApp Account",
+			"attached_to_name": account,
+			"file_name": qr_file_name(account),
+		},
+	)
+	if not existing:
+		return
+	try:
+		frappe.delete_doc("File", existing, ignore_permissions=True, delete_permanently=True)
+	except Exception:
+		# Transient lock from a near-simultaneous QR event — the caller falls
+		# through and inserts anyway; Frappe will auto-suffix the filename this
+		# one time rather than dropping the update entirely.
+		pass
+
+
 def _save_qr_image(account: str, qr_base64: str):
 	import base64
 
-	file_name = f"{account}-qr.png"
 	content = base64.b64decode(qr_base64)
 
 	# QR codes rotate every ~20-30s until scanned. Frappe's File doctype only
@@ -120,27 +149,20 @@ def _save_qr_image(account: str, qr_base64: str):
 	# updating an existing File doc's `content` and saving silently leaves the
 	# old bytes on disk. Delete the previous File first so the reinsert keeps
 	# the same filename (no collision, no auto-suffix) instead of piling up.
-	existing = frappe.db.get_value(
-		"File",
-		{"attached_to_doctype": "WhatsApp Account", "attached_to_name": account, "file_name": file_name},
-	)
-	if existing:
-		try:
-			frappe.delete_doc("File", existing, ignore_permissions=True, delete_permanently=True)
-		except Exception:
-			# Transient lock from a near-simultaneous QR event — fall through and
-			# insert anyway; Frappe will auto-suffix the filename this one time
-			# rather than dropping the update entirely.
-			pass
+	_delete_qr_image(account)
 
 	file_doc = frappe.get_doc(
 		{
 			"doctype": "File",
-			"file_name": file_name,
+			"file_name": qr_file_name(account),
 			"attached_to_doctype": "WhatsApp Account",
 			"attached_to_name": account,
 			"content": content,
 			"decode": False,
+			# A live QR is a credential: whoever scans it links their own device
+			# to this number. Public files are served to anyone who guesses the
+			# URL, and the filename is derived from the account name.
+			"is_private": 1,
 		}
 	)
 	file_doc.save(ignore_permissions=True)

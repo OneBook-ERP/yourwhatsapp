@@ -54,8 +54,9 @@ Each phase lists an objective, detailed tasks, and status. Update statuses as wo
 - [ ] UI buttons on `WhatsApp Account`: **Pause**, **Logout / Unlink**.
 
 ### C. Security
-- [ ] 🚫 Inbound media is saved as **public** files (210 customer images/docs/videos already public on dev) — save as `is_private=1`; migration patch to flip existing ones.
-- [ ] 🚫 QR codes are **public** at predictable URLs (`/files/<account name>-qr.png`) — anyone guessing the URL during pairing can link their own device to the account. Make private + randomized filename, or serve via a permission-checked endpoint; delete the QR file once connected.
+- [x] 🚫 Inbound media saved as `is_private=1`; `v1_0.make_whatsapp_files_private` patch flipped the 220 existing files and rewrote their `attach` URLs.
+- [x] 🚫 QR images now private, and deleted (with the `qr_code` field cleared) as soon as the account connects — a live QR is a credential. Same patch dropped the stale public ones.
+- [ ] Delete the 210 orphaned public QR pngs left on disk by the pre-1.5 churn bug (no `File` records; expired, but still publicly served).
 - [ ] Constant-time API key comparison on both sides (`hmac.compare_digest` / `crypto.timingSafeEqual`).
 - [ ] RBAC audit: who can create/read `WhatsApp Message` (Sales User currently has write), who can see `WhatsApp Account`/`Settings`; `connect()` role check vs doctype perms.
 - [ ] Confirm nginx `client_max_body_size` in the Frappe container allows inbound media callbacks (base64 up to ~22MB).
