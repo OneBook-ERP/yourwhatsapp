@@ -35,7 +35,9 @@ RELAY_API_KEY=<key> FRAPPE_BASE_URL=http://127.0.0.1:8001 RELAY_PORT=8800 \
   node server.js
 ```
 
-`WhatsApp Settings` needs: `relay_base_url` (e.g. `http://localhost:8800`), `relay_api_key` (same value as `RELAY_API_KEY` above), and `relay_reachable_frappe_url` (e.g. `http://127.0.0.1:8001` — see gotcha below).
+On this bench the relay env vars live in `<bench>/.env`, which honcho loads for the `relay` Procfile entry — `bench start` brings the relay up with everything else.
+
+`WhatsApp Settings` needs: `relay_base_url` (e.g. `http://localhost:8800`) and `relay_api_key` (same value as `RELAY_API_KEY` above). `relay_reachable_frappe_url` is **not read by any code** — the relay uses its own `FRAPPE_BASE_URL` env var. Phase 1.6 either repurposes or removes that field.
 
 Pairing: create a `WhatsApp Account`, then either click **Connect / Generate QR** on its form, or `POST /session/<session_id>/start` on the relay directly. Scan the QR shown on the account's `qr_code` field from a phone (WhatsApp → Linked Devices).
 
@@ -52,6 +54,10 @@ Pairing: create a `WhatsApp Account`, then either click **Connect / Generate QR*
 - **`whatsapp-web.js` 1.34.7's `message.id._serialized` is `undefined`** as of WhatsApp's July 2026 Web update — WhatsApp renamed the internal getter to `id.$1`, and the installed library version hasn't caught up. This silently broke `downloadMedia()` (opaque `r: r` error), outgoing `message_id` tracking, and ack status updates. `session_manager.js` backfills `_serialized` from `$1` via `patchSerializedId()`/`serializedId()` wherever an id object enters our code. Remove once upstream ships a fix ([wwebjs/whatsapp-web.js#201833](https://github.com/wwebjs/whatsapp-web.js/issues/201833)).
 - **Never hand the relay a URL to fetch for outgoing attachments.** User-uploaded files default to private in Frappe (`/private/files/...`), which an anonymous fetch from the relay's Node process can't read — and even public files hit the `.localhost` DNS gotcha above. `relay_client.py` reads the file directly via `File.get_content()` and sends it base64-encoded instead; the relay builds a `MessageMedia` object from bytes, no fetch involved.
 - **Express's default JSON body limit (100kb) silently rejects real media** once base64-encoded (~33% size inflation). `server.js` sets it to 25mb.
+- **Frappe `File` records default to `is_private=0`** — anything written without setting it explicitly is served to anyone with the URL, no login. Inbound customer media and QR images both shipped public until the 2026-09-18 fix (`v1_0.make_whatsapp_files_private` migrates old rows). A live QR is a credential: whoever scans it links their own device, so QR files are private and deleted once the account connects.
+- **WhatsApp emits far more than 1:1 chat messages** — contacts' status updates arrive as `status@broadcast`, plus groups (`@g.us`), broadcast lists and channels (`@newsletter`). None map to a single phone number, so CRM can't link them to a Lead/Deal; `session_manager.js` filters inbound messages *and* acks down to `@c.us`/`@lid`. Before that filter, 296 of 533 stored inbound messages were noise.
+- **WhatsApp acks every outgoing message on the linked number**, including ones typed on the phone that CRM never created. `api.message_status` treats an unknown `message_id` as a no-op — raising there filled the Error Log (60 of 78 entries).
+- **Desk terminal note:** stopping `bench start` with Ctrl+Z (instead of Ctrl+C) leaves the whole stack running and holding ports 8001/9001/8800 — the next `bench start` dies with `EADDRINUSE :9001`. Look for a honcho process in `T` state.
 
 ## Anti-ban
 
