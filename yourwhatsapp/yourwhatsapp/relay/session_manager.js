@@ -26,6 +26,13 @@ function patchSerializedId(id) {
 	return id;
 }
 
+// Only 1:1 chats map onto a single CRM contact. Status updates (status@broadcast),
+// groups (@g.us), broadcast lists and channels (@newsletter) have no one
+// counterpart number, so they'd only land in CRM as unlinkable noise.
+function isDirectChat(waId) {
+	return typeof waId === "string" && (waId.endsWith("@c.us") || waId.endsWith("@lid"));
+}
+
 // WhatsApp increasingly addresses contacts by a privacy-preserving "lid" (Linked ID)
 // instead of their real phone number JID. Resolve it back to a phone number when possible.
 async function resolvePhoneNumber(client, waId) {
@@ -80,7 +87,7 @@ function buildClient(sessionId) {
 	});
 
 	client.on("message", async (msg) => {
-		if (msg.fromMe) return;
+		if (msg.fromMe || !isDirectChat(msg.from)) return;
 		patchSerializedId(msg.id);
 
 		let media = null;
@@ -110,6 +117,7 @@ function buildClient(sessionId) {
 
 	client.on("message_ack", async (msg, ack) => {
 		// ack: -1 error, 1 sent to server, 2 delivered, 3 read
+		if (!isDirectChat(msg?.fromMe ? msg.to : msg?.from)) return;
 		const statusMap = { "-1": "Failed", 1: "Sent", 2: "Delivered", 3: "Read" };
 		const status = statusMap[String(ack)];
 		const messageId = serializedId(msg?.id);

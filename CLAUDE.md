@@ -25,7 +25,7 @@ Key insight that shapes the whole design: **Frappe CRM already has a full WhatsA
 
 ## Running locally
 
-Site: `whatsapp.localhost`. Apps installed: `frappe`, `erpnext`, `draw`, `flowlane`, `crm`, `yourwhatsapp`. (`frappe_whatsapp`, `telephony`, `whatsapp_automation_pro` exist as source on this bench but are intentionally **not** installed — reference only.)
+Site: `whatsapp.localhost`. Apps installed: `frappe`, `erpnext`, `crm`, `yourwhatsapp`. (`frappe_whatsapp`, `telephony`, `whatsapp_automation_pro` exist as source on this bench but are intentionally **not** installed — reference only.)
 
 ```bash
 cd apps/yourwhatsapp/yourwhatsapp/relay
@@ -59,4 +59,4 @@ No self-hosted/unofficial client setup is "ban-proof" — this is risk *reductio
 
 ## Phase status
 
-See `ROADMAP.md` for the full phase-by-phase breakdown with objectives and detailed task lists. Short version: Phase 1 (foundation) and Phase 1.5 (hardening — media send/receive, private files, several real relay/wwebjs bugs) are done and verified against real WhatsApp numbers. Phase 2 (trigger-based auto-messaging) is chosen as next priority but not started.
+See `ROADMAP.md` for the full phase-by-phase breakdown with objectives and detailed task lists. Short version: Phase 1 (foundation) and Phase 1.5 (hardening — media send/receive, private files, several real relay/wwebjs bugs) are done and verified against real WhatsApp numbers. Phase 1.6 (production readiness: Docker deploy, UI-only relay setup, security/reliability blockers) is in progress and blocks go-live; Phase 2 (trigger-based auto-messaging) comes after.

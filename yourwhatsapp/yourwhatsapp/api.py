@@ -80,7 +80,9 @@ def message_status(message_id: str, status: str, error_reason: str | None = None
 
 	name = frappe.db.get_value("WhatsApp Message", {"message_id": message_id}, "name")
 	if not name:
-		frappe.throw(f"No WhatsApp Message found for message_id {message_id}", frappe.DoesNotExistError)
+		# Expected, not an error: WhatsApp acks every outgoing message on the
+		# linked number, including ones typed on the phone that CRM never sent.
+		return {"ok": False, "reason": "unknown message_id"}
 
 	frappe.db.set_value("WhatsApp Message", name, "status", status)
 	if error_reason:

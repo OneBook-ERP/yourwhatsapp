@@ -32,7 +32,64 @@ Each phase lists an objective, detailed tasks, and status. Update statuses as wo
 - [x] Inbound media never downloaded at all — `session_manager.js` set `content_type` correctly but never called `msg.downloadMedia()`. Fixed, media now saved as a `File` on the incoming `WhatsApp Message`.
 - [x] Worked around an open upstream `whatsapp-web.js` 1.34.7 bug: WhatsApp's July 2026 Web update renamed the internal serialized-id getter (`_serialized` → `$1`), silently breaking `downloadMedia()`, outgoing `message_id` tracking, and ack status updates. Backfilled in our own code (tracked upstream: [wwebjs/whatsapp-web.js#201833](https://github.com/wwebjs/whatsapp-web.js/issues/201833)).
 
-## Phase 2 — Trigger-Based Automated Messaging 🔲 Not started (chosen next priority)
+## Phase 1.6 — Production Readiness 🔄 In progress (blocks go-live, ahead of Phase 2)
+
+**Objective:** Make the existing send/receive system safe and operable in production. Production runs in Docker with no shell access for us (no `bench`/`docker exec`), so everything after the initial compose deploy must be configurable from the Desk UI by a System Manager. 🚫 = must fix before go-live; the rest should land before real volume.
+
+### A. Docker deployment + UI-only setup
+- [ ] 🚫 Relay Docker image (`relay/Dockerfile`): Node + system Chromium baked in (no `CHROMIUM_PATH` to configure), `tini`/`init: true` so Chromium children get reaped, `/app/.sessions` as a volume.
+- [ ] 🚫 Example compose service (`whatsapp-relay`): no published port (internal docker network only), sessions volume, `stop_grace_period: 30s`, healthcheck.
+- [ ] 🚫 **Relay claim flow — no terminal needed for the key.** Relay boots unclaimed (no `RELAY_API_KEY` env required). System Manager enters relay URL in `WhatsApp Settings` → **Connect Relay** → Frappe generates a random key, POSTs it to relay `/claim` along with its callback URL + site name; relay persists it in its volume and rejects any further claims. Key stored in `relay_api_key` (Password). Optional `RELAY_BOOTSTRAP_TOKEN` env to require a token for claiming. Reset = wipe relay volume.
+- [ ] 🚫 Relay sends callbacks with `Host: <site name>` so multi-site benches route correctly; callback URL comes from the claim, replacing the `FRAPPE_BASE_URL` env var. Repurpose (or remove) the currently-unused `relay_reachable_frappe_url` field.
+- [ ] Settings page relay panel: connection status, relay version, session count, **Test Connection**, **Rotate Key**.
+- [ ] `GET /health` on the relay (unauthenticated, no data) for the docker healthcheck.
+- [ ] `RELAY_HOST` bind option (default `0.0.0.0` in Docker, `127.0.0.1` for bare-metal installs).
+- [ ] Setup guide (`DEPLOYMENT.md`): compose snippet, Settings walkthrough, pairing, backup of the sessions volume.
+
+### B. Session lifecycle (Docker restarts containers often)
+- [ ] 🚫 Auto-restore every paired session on relay boot (from `.sessions/`) — today a relay restart leaves all accounts `Active` in Frappe but unable to send until manually reconnected.
+- [ ] 🚫 `Connect` must work after a disconnect — `startSession` returns the stale map entry, `disconnected` never removes it.
+- [ ] 🚫 Graceful SIGTERM handler: `client.destroy()` every session before exit. Repeated abrupt kills can get a device unlinked by WhatsApp (see CLAUDE.md gotchas).
+- [ ] Status reconciliation: scheduler job polls relay `/session/:id/status` and syncs `WhatsApp Account.status` + `last_health_check` (field exists, unused).
+- [ ] UI buttons on `WhatsApp Account`: **Pause**, **Logout / Unlink**.
+
+### C. Security
+- [ ] 🚫 Inbound media is saved as **public** files (210 customer images/docs/videos already public on dev) — save as `is_private=1`; migration patch to flip existing ones.
+- [ ] 🚫 QR codes are **public** at predictable URLs (`/files/<account name>-qr.png`) — anyone guessing the URL during pairing can link their own device to the account. Make private + randomized filename, or serve via a permission-checked endpoint; delete the QR file once connected.
+- [ ] Constant-time API key comparison on both sides (`hmac.compare_digest` / `crypto.timingSafeEqual`).
+- [ ] RBAC audit: who can create/read `WhatsApp Message` (Sales User currently has write), who can see `WhatsApp Account`/`Settings`; `connect()` role check vs doctype perms.
+- [ ] Confirm nginx `client_max_body_size` in the Frappe container allows inbound media callbacks (base64 up to ~22MB).
+
+### D. Reliability
+- [ ] 🚫 Relay→Frappe callbacks are log-and-drop (`frappe_client.js`) — an inbound message arriving while Frappe restarts during a deploy is lost forever. Persist to a small on-disk queue in the relay volume, retry with backoff.
+- [ ] Failed outgoing messages: **Retry** button + automatic retry when the failure was "relay/session unavailable" (not for invalid numbers).
+- [ ] Ack race: an ack can arrive before `message_id` is saved (now silently ignored) — retry briefly or have the relay return the id synchronously before ack listeners fire; make status monotonic (`Read` must not be overwritten by a late `Delivered`/`Sent`).
+- [ ] Atomic `daily_message_count` increment (`UPDATE ... SET x = x + 1`) — current read-modify-write loses counts under concurrent workers.
+- [ ] Dedupe inbound by `message_id`.
+- [ ] Pin `whatsapp-web.js` to an exact version + `npm ci` in the image — WhatsApp Web changes already broke 1.34.7 once (July 2026); upgrades must be deliberate and tested.
+
+### E. Functional bugs (from 2026-09-18 audit)
+- [x] Status updates (`status@broadcast`), groups (`@g.us`), broadcast lists and channels no longer stored as inbound CRM messages — relay filters to 1:1 chats only. Existing rows kept.
+- [x] Acks for messages CRM didn't send (typed on the phone, groups) no longer raise `DoesNotExistError` into Error Log.
+- [ ] 🚫 Normalize outgoing numbers to digits only (`+91 98765 43210` → `919876543210`) and validate with `client.getNumberId()` before sending — `+`-prefixed numbers currently fail with 502.
+- [ ] 🚫 `crm.api.whatsapp.send_whatsapp_template` sends no parameters → templates go out with literal `{{1}}`. Resolve params from the reference doc (or block templates with unresolved placeholders).
+- [ ] Reactions (`content_type: reaction`) are sent as a plain text emoji — use `msg.react()` on the target message.
+- [ ] Replies: pass `quotedMessageId` on outgoing replies; send `reply_to_message_id` on inbound quoted messages so CRM shows reply context.
+- [ ] Unresolvable `@lid` senders are stored as a fake phone number (e.g. `157844527657214`) — store the raw lid in a separate field and flag it instead.
+- [ ] `default_outgoing_account` (Settings) vs `is_default_outgoing` (Account) duplication; CRM's `is_whatsapp_enabled` requires the Settings one — routing ignores both. Pick one and document it; setup must set it or CRM hides WhatsApp entirely.
+
+### F. Minimum anti-ban before real volume (subset of Phase 3)
+- [ ] Per-account realistic, current user-agent instead of wwebjs's hardcoded `Chrome/101`.
+- [ ] Randomized inter-send delay per account (queue per account instead of immediate dispatch).
+- [ ] `RateLimited` cooldown → auto-return to `Active`.
+- [ ] Warm-up policy documented for new numbers (low `daily_limit`, raise over 1–2 weeks).
+
+### G. Ops / quality
+- [ ] Tests: routing, `api.py` endpoints (auth, unknown ids, inbound media), `relay_client` failover. None exist today.
+- [ ] Structured JSON logs from the relay to stdout (Docker log driver picks them up).
+- [ ] Health alert (Notification / System Console) when an account goes `Disconnected`.
+
+## Phase 2 — Trigger-Based Automated Messaging 🔲 Not started (next after Phase 1.6)
 
 **Objective:** This is the actual point of the spec — turn the system from a manual sender into a CRM-event-driven ops tool. Everything built so far is plumbing for this.
 
@@ -76,12 +133,9 @@ Each phase lists an objective, detailed tasks, and status. Update statuses as wo
 - [ ] Notes/tags/workflow references specific to WhatsApp conversations, if not already covered by CRM's generic comment/tag system.
 - [ ] Cross-reference with Phase 2's automation log — the spec's "automation logs showing why and when triggered" requirement spans both.
 
-## Non-functional / production readiness (cross-cutting, not a single phase)
+## Non-functional / production readiness
 
-- [ ] RBAC audit: `WhatsApp Admin`/`WhatsApp Operator` roles exist on doctypes but haven't been reviewed end-to-end against the spec's "admins, operators, and sales/support users" requirement.
-- [ ] Structured logging for debugging/audit purposes beyond the current ad-hoc `console.error` calls in the relay.
-- [ ] Deployment docs for the relay as a properly-managed process (systemd/pm2), not just `bench start`'s Procfile entry — production process management was explicitly called out as a deployment-time decision in the Phase 1 plan, still undecided.
-- [ ] Reliable webhook/callback handling review — current retry behavior on relay↔Frappe callback failures is minimal (log-and-drop in `frappe_client.js`).
+Moved into Phase 1.6 (RBAC audit, structured logging, deployment/process management — decided: Docker compose service, callback retry).
 
 ---
 
