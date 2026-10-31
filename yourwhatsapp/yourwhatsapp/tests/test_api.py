@@ -133,6 +133,17 @@ class TestRelayCallbacks(IntegrationTestCase):
 		self.assertEqual(row.status, "RateLimited")
 		self.assertIsNotNone(row.rate_limited_until)
 
+	def test_temp_banned_does_not_override_paused(self):
+		frappe.db.set_value("WhatsApp Account", self.account.name, "status", "Paused")
+		api.account_event(self.account.session_id, "temp_banned", until="2026-10-31T12:00:00Z")
+		msg = self._make_outgoing()
+		api.message_status(status="Failed", local_message_id=msg.name, error_code="temp_banned")
+		row = frappe.db.get_value(
+			"WhatsApp Account", self.account.name, ["status", "rate_limited_until"], as_dict=True
+		)
+		self.assertEqual(row.status, "Paused")
+		self.assertIsNone(row.rate_limited_until)
+
 	def test_update_qr_active_ignored_when_paused(self):
 		frappe.db.set_value("WhatsApp Account", self.account.name, "status", "Paused")
 		api.update_qr(self.account.session_id, status="Active")

@@ -34,3 +34,13 @@ def pick_account(exclude=None):
 
 def pick_failover_account(failed_account):
 	return pick_account(exclude=[failed_account])
+
+
+def mark_rate_limited(account, until=None):
+	"""Flag an account RateLimited unless an admin has Paused it: Frappe owns admin intent."""
+	if frappe.db.get_value("WhatsApp Account", account, "status") == "Paused":
+		return
+	values = {"status": "RateLimited"}
+	if until:
+		values["rate_limited_until"] = until
+	frappe.db.set_value("WhatsApp Account", account, values)

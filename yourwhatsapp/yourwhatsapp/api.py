@@ -5,6 +5,9 @@ from zoneinfo import ZoneInfo
 import frappe
 from frappe.utils import get_datetime, get_system_timezone, now_datetime
 
+from yourwhatsapp.yourwhatsapp.relay_client import increment_daily_count
+from yourwhatsapp.yourwhatsapp.routing import mark_rate_limited
+
 STATUS_RANK = {"Queued": 0, "Sent": 1, "Delivered": 2, "Read": 3}
 FAILOVER_ERROR_CODES = {"session_unavailable", "send_failed", "temp_banned"}
 FAILOVER_METHOD = "yourwhatsapp.yourwhatsapp.relay_client.handle_async_failure"
@@ -124,6 +127,10 @@ def message_status(
 	if status == "Sent" and message_id:
 		values["message_id"] = message_id
 	frappe.db.set_value("WhatsApp Message", name, values)
+	if status == "Sent" and current != "Sent":
+		account = frappe.db.get_value("WhatsApp Message", name, "whatsapp_account")
+		if account:
+			increment_daily_count(account)
 	return {"ok": True}
 
 
@@ -150,7 +157,7 @@ def _apply_failure(name: str, current: str | None, error_reason: str | None, err
 		if error_code == "temp_banned":
 			account = frappe.db.get_value("WhatsApp Message", name, "whatsapp_account")
 			if account:
-				frappe.db.set_value("WhatsApp Account", account, "status", "RateLimited")
+				mark_rate_limited(account)
 		frappe.enqueue(FAILOVER_METHOD, message_name=name, error_code=error_code, enqueue_after_commit=True)
 	return {"ok": True}
 
@@ -166,10 +173,7 @@ def account_event(session_id: str, event: str, until: str | None = None):
 	if event != "temp_banned":
 		return {"ok": False, "reason": "unknown event"}
 
-	values = {"status": "RateLimited"}
-	if until:
-		values["rate_limited_until"] = _to_system_datetime(until)
-	frappe.db.set_value("WhatsApp Account", account, values)
+	mark_rate_limited(account, _to_system_datetime(until) if until else None)
 	return {"ok": True}
 
 
