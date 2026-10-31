@@ -1,48 +1,39 @@
 import os
-from contextlib import redirect_stdout
-from io import StringIO
+import tempfile
+import unittest
 
-import frappe
-from frappe.tests import IntegrationTestCase
-from frappe.utils import random_string
+from yourwhatsapp.patches.v1_0.delete_orphan_public_qr_images import _delete_orphans
 
-from yourwhatsapp.patches.v1_0 import delete_orphan_public_qr_images
+ACCOUNTS = {"Primary India Number", "Harris"}
 
 
-class TestDeleteOrphanPublicQrImages(IntegrationTestCase):
-	def tearDown(self):
-		frappe.db.rollback()
+class TestDeleteOrphanPublicQrImages(unittest.TestCase):
+	"""Runs against a temp dir only: never the site's real public files."""
 
-	def _public_file(self, file_name):
-		path = frappe.get_site_path("public", "files", file_name)
-		with open(path, "wb") as f:
-			f.write(b"qr")
-		self.addCleanup(lambda: os.path.exists(path) and os.remove(path))
-		return path
+	def _run(self, names, referenced=()):
+		with tempfile.TemporaryDirectory() as public_dir:
+			for name in names:
+				with open(os.path.join(public_dir, name), "wb") as f:
+					f.write(b"qr")
+			deleted = _delete_orphans(public_dir, set(referenced), ACCOUNTS)
+			return deleted, set(os.listdir(public_dir))
 
-	def test_deletes_only_orphaned_qr_images(self):
-		tag = random_string(8).lower()
-		orphan = self._public_file(f"g8-{tag}-qr.png")
-		suffixed = self._public_file(f"g8-{tag}-qr5f2a1.png")
-		unrelated = self._public_file(f"g8-{tag}-photo.png")
-		kept_doc = frappe.get_doc(
-			{
-				"doctype": "File",
-				"file_name": f"g8-{tag}-kept-qr.png",
-				"content": b"qr",
-				"decode": False,
-				"is_private": 0,
-			}
-		).insert(ignore_permissions=True)
-		kept = frappe.get_site_path("public", kept_doc.file_url.lstrip("/"))
-		self.addCleanup(lambda: os.path.exists(kept) and os.remove(kept))
+	def test_deletes_orphaned_account_qr_images(self):
+		deleted, left = self._run(["Primary India Number-qre87db8.png", "Harris-qr.png"])
+		self.assertEqual((deleted, left), (2, set()))
 
-		out = StringIO()
-		with redirect_stdout(out):
-			delete_orphan_public_qr_images.execute()
+	def test_keeps_qr_image_with_file_record(self):
+		name = "Primary India Number-qre87db8.png"
+		deleted, left = self._run([name], referenced={f"/files/{name}"})
+		self.assertEqual((deleted, left), (0, {name}))
 
-		self.assertFalse(os.path.exists(orphan))
-		self.assertFalse(os.path.exists(suffixed))
-		self.assertTrue(os.path.exists(unrelated))
-		self.assertTrue(os.path.exists(kept))
-		self.assertRegex(out.getvalue(), r"Deleted \d+ orphan public QR image")
+	def test_keeps_files_that_are_not_account_qr_images(self):
+		names = [
+			"store-qrcode.png",
+			"summer-qr-promo.png",
+			"upi-qr.png",  # matches the shape, but "upi" is no WhatsApp Account
+			"Harris-qrXYZ.png",
+			"Harris-qr.jpg",
+		]
+		deleted, left = self._run(names)
+		self.assertEqual((deleted, left), (0, set(names)))
