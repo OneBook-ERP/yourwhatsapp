@@ -1,59 +1,66 @@
 # yourwhatsapp relay
 
-Self-hosted WhatsApp sending/receiving layer, backed by `whatsapp-web.js`. Runs as a standalone Node process alongside the Frappe bench — not part of gunicorn/workers. One `whatsapp-web.js` client (and one Chromium) per paired number.
+Self-hosted WhatsApp sending/receiving layer for the Frappe bench, written in Go on top of [whatsmeow](https://github.com/tulir/whatsmeow) (direct multi-device websocket, no headless browser). One static binary serves every paired number: one whatsmeow client per `WhatsApp Account`. It is an internal ops tool, not approved by or affiliated with Meta/WhatsApp, and not "ban-proof".
 
-## Setup
+Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`. Production setup: `DEPLOYMENT.md`.
+
+The legacy Node/whatsapp-web.js files (`server.js`, `session_manager.js`, `frappe_client.js`, `package*.json`) in this directory are kept only until cutover and are deleted afterwards. Ignore them for the Go relay.
+
+## Build and run
+
+Go is installed at `$HOME/.local/go/bin` on the dev container and is not on `PATH`.
 
 ```bash
-cd apps/yourwhatsapp/yourwhatsapp/relay
-npm install
+export PATH=$HOME/.local/go/bin:$PATH
+cd apps/yourwhatsapp/yourwhatsapp/yourwhatsapp/relay
+make build   # CGO_ENABLED=0 go build -o bin/relay ./cmd/relay
+make test    # go test ./...
+make run     # go run ./cmd/relay
 ```
+
+```bash
+RELAY_API_KEY=<key> FRAPPE_BASE_URL=http://127.0.0.1:8001 RELAY_PORT=8800 \
+  RELAY_DATA_DIR=$PWD/data bin/relay
+```
+
+`bin/relay healthcheck` probes `http://127.0.0.1:$RELAY_PORT/health` and exits 0 or 1 (used by the Docker `HEALTHCHECK`).
 
 ## Environment variables
 
-- `RELAY_API_KEY` — shared secret, must match `WhatsApp Settings.relay_api_key` on the Frappe site. Required; the relay exits without it.
-- `FRAPPE_BASE_URL` — base URL the relay calls back on (e.g. `http://127.0.0.1:8001`). Must be a URL Node can resolve — `.localhost` names don't resolve from Node on some hosts, use `127.0.0.1:<port>`.
-- `RELAY_PORT` — relay HTTP port (default `8800`). Named `RELAY_PORT`, not `PORT`, which collides with other tooling.
-- `CHROMIUM_PATH` — path to a system Chromium binary. Puppeteer's bundled Chromium is x86_64-only; on ARM hosts (e.g. Apple Silicon under Docker) it won't run — point this at a native ARM Chromium instead (e.g. `/usr/bin/chromium-headless-shell` on Debian/Ubuntu with `chromium-headless-shell` installed).
+| Variable | Default | Purpose |
+|---|---|---|
+| `RELAY_API_KEY` | required | Shared secret; must equal `WhatsApp Settings.relay_api_key`. The relay refuses to start without it. |
+| `FRAPPE_BASE_URL` | `http://127.0.0.1:8001` | Where callbacks are POSTed. Use `127.0.0.1`, since `.localhost` names do not resolve from the relay process. |
+| `FRAPPE_SITE_NAME` | empty | Sent as the `Host` header on callbacks, for multi-site or container setups (e.g. `crm.example.com`). |
+| `RELAY_HOST` | `127.0.0.1` | Listen address. `0.0.0.0` in Docker. |
+| `RELAY_PORT` | `8800` | Listen port (named `RELAY_PORT`, not `PORT`, which collides). |
+| `RELAY_DATA_DIR` | `./data` | Holds `relay.db`. Back it up. |
+| `SEND_DELAY_MIN` / `SEND_DELAY_MAX` | `4s` / `12s` | Per-account random delay between outgoing messages (Go durations). |
 
-On a dev bench these are read from `<bench>/.env`, which honcho loads for the `relay` Procfile entry, so `bench start` brings the relay up with the rest of the bench.
+## Routes
 
-## Run
+Every route except `/health` needs the `x-api-key` header. Responses are JSON.
 
-```bash
-RELAY_API_KEY=<key> FRAPPE_BASE_URL=http://127.0.0.1:8001 npm start
-```
+| Method & path | Notes |
+|---|---|
+| `GET /health` | `{"ok":true}`. No auth. |
+| `POST /session/:id/start` | Optional `{"proxy": ...}`. Creates the account if new; connects if paired, otherwise starts the QR flow. Idempotent. |
+| `POST /session/:id/pair-code` | `{"phone": "+91 98765 43210"}` returns `{"code": "ABCD-1234"}`. Session must be unpaired. |
+| `GET /session/:id/status` | `{"status", "jid", "phone"}` |
+| `POST /session/:id/pause` | Disconnect and do not restore on boot. |
+| `POST /session/:id/resume` | Optional `{"proxy": ...}`. |
+| `POST /session/:id/logout` | Unlink the device from WhatsApp and delete its keys. |
+| `POST /message/send` | `local_message_id` required. Asynchronous: **202** `{"state":"queued"}`; the result arrives later as a `message_status` callback. Errors: 400 `bad_request`, 422 `invalid_number`, 409 `session_unavailable`, 429 `temp_banned`; 200 `duplicate` for an already queued or sent id. |
 
-## Endpoints
+Status values: `not_started`, `qr_pending`, `pairing`, `connecting`, `connected`, `disconnected`, `logged_out`, `paused`, `temp_banned`.
 
-All require the `x-api-key` header.
-
-| Method | Path | Purpose |
-| --- | --- | --- |
-| POST | `/session/:id/start` | Initialize a client, trigger QR generation |
-| GET | `/session/:id/status` | `not_started` / `initializing` / `qr_pending` / `connected` / `disconnected` |
-| POST | `/session/:id/pause` | Destroy the client, keep the stored session |
-| POST | `/session/:id/resume` | Start it again |
-| POST | `/message/send` | Send text or media (media as base64 in the body) |
-
-Callbacks into Frappe (`api.py`): `update_qr`, `inbound_message`, `message_status`.
+Callbacks into Frappe (`yourwhatsapp.api`): `update_qr`, `inbound_message`, `message_status`, `account_event`. They go through a persistent SQLite outbox with retry and backoff, so a Frappe outage does not lose messages; permanently failed rows move to `outbox_dead`.
 
 ## Behaviour worth knowing
 
-- **Only 1:1 chats are relayed.** Status updates (`status@broadcast`), groups (`@g.us`), broadcast lists and channels are ignored in both directions — they have no single counterpart number for CRM to link to a Lead or Deal.
-- **Delivery/read receipts for messages CRM didn't send** (typed on the phone, for example) are ignored by Frappe as a no-op rather than treated as an error.
-- **Attachments are never fetched by the relay.** Frappe reads the file and sends the bytes base64-encoded, so private files and unresolvable URLs are not a problem. The JSON body limit is 25mb for this reason.
-- **Sessions are not restored when the relay restarts** — each account must currently be reconnected from its form. Fixing this is a Phase 1.6 blocker.
-- **Killing the relay does not kill its Chromium children.** Terminate the `chromium-headless-shell` processes under `.sessions/session-<id>/` too, or the leftover browsers hold the profile lock. Avoid hard-killing a live session: WhatsApp can unlink a device that keeps disconnecting abruptly.
-
-## Pairing a number
-
-1. Create a `WhatsApp Account` doc in Frappe (generates a `session_id`).
-2. `POST /session/<session_id>/start` (with `x-api-key` header) to initialize the client and trigger QR generation, or click **Connect / Generate QR** on the account form.
-3. The QR is pushed back to the `WhatsApp Account.qr_code` field as a **private** file — scan it from the WhatsApp mobile app (Linked Devices). A live QR is a credential: anyone who scans it links their own device to the number.
-4. On successful pairing, `WhatsApp Account.status` flips to `Active` and the QR file is deleted.
-
-## Security
-
-- Never expose the relay port to the internet. Anyone who can reach it with the key can send messages as your numbers.
-- `.sessions/` holds logged-in WhatsApp sessions. Copying that directory is enough to use the numbers without scanning anything — restrict access and treat backups of it like credentials.
+- Only 1:1 chats (`@c.us` / `@lid`) are relayed. Status updates, groups, broadcast lists and channels are dropped.
+- Attachments are base64 in the request body (limit 25 MB); the relay never fetches URLs.
+- Sessions are restored from `relay.db` on boot, so a restart does not need re-scanning.
+- Never run two relays against the same data dir or the same linked number: WhatsApp replaces the stream and the two fight.
+- `relay.db` holds the device keys. Anyone with a copy can act as the linked number: treat it and its backups like credentials, and never expose the relay port to the internet.
+- Logs are JSON on stdout with `session_id` on per-account lines. Message bodies, media, QR codes and keys are never logged.
