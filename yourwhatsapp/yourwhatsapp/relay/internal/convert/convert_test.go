@@ -187,6 +187,29 @@ func TestInboundDropsProtocolEditAndEmpty(t *testing.T) {
 	}
 }
 
+// Poll votes, pins, keep-in-chat and similar control messages are not chat
+// content: they are dropped instead of arriving as "[unsupported]".
+func TestInboundDropsControlMessages(t *testing.T) {
+	cases := map[string]*waE2E.Message{
+		"poll vote":      {PollUpdateMessage: &waE2E.PollUpdateMessage{}},
+		"pin":            {PinInChatMessage: &waE2E.PinInChatMessage{}},
+		"keep in chat":   {KeepInChatMessage: &waE2E.KeepInChatMessage{}},
+		"event response": {EncEventResponseMessage: &waE2E.EncEventResponseMessage{}},
+		"poll add":       {PollAddOptionMessage: &waE2E.PollAddOptionMessage{}},
+		"secret edit":    {SecretEncryptedMessage: &waE2E.SecretEncryptedMessage{}},
+		"history notice": {MessageHistoryNotice: &waE2E.MessageHistoryNotice{}},
+		"vote with context": {
+			PollUpdateMessage:  &waE2E.PollUpdateMessage{},
+			MessageContextInfo: &waE2E.MessageContextInfo{},
+		},
+	}
+	for name, m := range cases {
+		if p, _, ok := Inbound("s1", msgEvt(pn("1"), m), noResolve); ok {
+			t.Errorf("%s: expected drop, got %+v", name, p)
+		}
+	}
+}
+
 func TestReceiptStatus(t *testing.T) {
 	cases := []struct {
 		in     types.ReceiptType
@@ -195,7 +218,7 @@ func TestReceiptStatus(t *testing.T) {
 	}{
 		{types.ReceiptTypeDelivered, "Delivered", true},
 		{types.ReceiptTypeRead, "Read", true},
-		{types.ReceiptTypeReadSelf, "Read", true},
+		{types.ReceiptTypeReadSelf, "", false}, // our own other device read an incoming message
 		{types.ReceiptTypePlayed, "Read", true},
 		{types.ReceiptTypeSender, "", false},
 		{types.ReceiptTypeRetry, "", false},
