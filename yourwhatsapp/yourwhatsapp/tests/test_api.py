@@ -113,6 +113,54 @@ class TestRelayCallbacks(IntegrationTestCase):
 		self.assertFalse(result["ok"])
 		self.assertEqual(self._failover_calls(), [])
 
+	def test_receipt_ignores_incoming_with_same_message_id(self):
+		incoming = self._inbound(message_id="SHARED1")["name"]
+		result = api.message_status(status="Read", message_id="SHARED1")
+		self.assertFalse(result["ok"])
+		self.assertEqual(frappe.db.get_value("WhatsApp Message", incoming, "status"), "Received")
+
+	def test_message_id_is_indexed(self):
+		self.assertTrue(frappe.get_meta("WhatsApp Message").get_field("message_id").search_index)
+		self.assertTrue(frappe.db.has_index("tabWhatsApp Message", "message_id_index"))
+
+	def test_send_unconfirmed_keeps_message_id_without_failover(self):
+		msg = self._make_outgoing()
+		api.message_status(
+			status="Failed",
+			local_message_id=msg.name,
+			message_id="WAID-UNC",
+			error_code="send_unconfirmed",
+			error_reason="send not confirmed by WhatsApp; may have been delivered",
+		)
+		row = self._status(msg.name)
+		self.assertEqual((row.status, row.message_id), ("Failed", "WAID-UNC"))
+		self.assertEqual(self._failover_calls(), [])
+
+		# A later receipt proves delivery and lifts the status.
+		api.message_status(status="Delivered", message_id="WAID-UNC")
+		self.assertEqual(self._status(msg.name).status, "Delivered")
+
+	def test_inbound_media_save_failure_keeps_message(self):
+		from frappe.core.doctype.file.exceptions import MaxFileSizeReachedError
+		from frappe.core.doctype.file.file import File
+
+		def partial_write_then_fail(file_doc, **kwargs):
+			# Anything written before the error must be rolled back.
+			frappe.db.set_value("WhatsApp Message", file_doc.attached_to_name, "attach", "/private/files/partial")
+			raise MaxFileSizeReachedError
+
+		with patch.object(File, "save", autospec=True, side_effect=partial_write_then_fail):
+			name = self._inbound(
+				message_id="IN-BIG",
+				content_type="image",
+				media_base64="aGVsbG8=",
+				media_mimetype="image/jpeg",
+			)["name"]
+		row = frappe.db.get_value("WhatsApp Message", name, ["message", "attach"], as_dict=True)
+		self.assertEqual(row.message, "hello\n[attachment could not be saved]")
+		self.assertFalse(row.attach)
+		self.assertFalse(frappe.db.exists("File", {"attached_to_name": name}))
+
 	def test_inbound_dedupe(self):
 		first = self._inbound(message_id="IN1")
 		second = self._inbound(message_id="IN1")

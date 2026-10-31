@@ -63,9 +63,22 @@ def inbound_message(
 	doc.insert(ignore_permissions=True)
 
 	if media_base64:
-		_save_inbound_media(doc.name, media_base64, media_mimetype, media_filename)
+		_save_inbound_media_or_note(doc, media_base64, media_mimetype, media_filename)
 
 	return {"name": doc.name}
+
+
+def _save_inbound_media_or_note(doc, media_base64: str, mimetype: str | None, filename: str | None):
+	"""Keep the message even when its media can't be stored (e.g. over the site's max file size)."""
+	savepoint = "inbound_media"
+	frappe.db.savepoint(savepoint)
+	try:
+		_save_inbound_media(doc.name, media_base64, mimetype, filename)
+	except Exception:
+		frappe.db.rollback(save_point=savepoint)
+		frappe.log_error(title="WhatsApp inbound media not saved", reference_doctype=doc.doctype, reference_name=doc.name)
+		note = "[attachment could not be saved]"
+		frappe.db.set_value(doc.doctype, doc.name, "message", f"{doc.message}\n{note}" if doc.message else note)
 
 
 def _save_inbound_media(message_name: str, media_base64: str, mimetype: str | None, filename: str | None):
@@ -112,7 +125,7 @@ def message_status(
 
 	current = frappe.db.get_value("WhatsApp Message", name, "status")
 	if status == "Failed":
-		return _apply_failure(name, current, error_reason, error_code)
+		return _apply_failure(name, error_reason, error_code, message_id)
 
 	if status not in STATUS_RANK:
 		return {"ok": False, "reason": "unknown status"}
@@ -135,11 +148,12 @@ def _find_message(message_id: str | None, local_message_id: str | None) -> str |
 	if local_message_id:
 		return frappe.db.exists("WhatsApp Message", local_message_id)
 	if message_id:
-		return frappe.db.get_value("WhatsApp Message", {"message_id": message_id}, "name")
+		# Receipts only ever concern messages we sent; an incoming message can share the id.
+		return frappe.db.get_value("WhatsApp Message", {"message_id": message_id, "type": "Outgoing"}, "name")
 	return None
 
 
-def _apply_failure(name: str, current: str | None, error_reason: str | None, error_code: str | None):
+def _apply_failure(name: str, error_reason: str | None, error_code: str | None, message_id: str | None):
 	# Only a message still waiting on the relay can fail; once it was Sent (or a
 	# failure was already handled) a late Failed callback is noise. Re-read under
 	# a row lock so concurrent callbacks and the failover job see one another.
@@ -150,6 +164,10 @@ def _apply_failure(name: str, current: str | None, error_reason: str | None, err
 	values = {"status": "Failed"}
 	if error_reason:
 		values["error_reason"] = error_reason
+	if message_id:
+		# send_unconfirmed: WhatsApp may still have delivered it, and a later
+		# receipt for this id lifts the status (it is not a failover code).
+		values["message_id"] = message_id
 	frappe.db.set_value("WhatsApp Message", name, values)
 
 	if error_code in FAILOVER_ERROR_CODES:
