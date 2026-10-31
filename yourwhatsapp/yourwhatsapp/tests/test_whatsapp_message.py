@@ -72,6 +72,31 @@ class TestOutgoingMessage(IntegrationTestCase):
 		self.assertEqual(frappe.db.get_value("WhatsApp Message", name, "to"), "919566372605")
 		self.assertIn(name, [m["name"] for m in get_whatsapp_messages("CRM Lead", lead.name)])
 
+	def test_any_account_links_to_same_crm_lead(self):
+		# The thread belongs to the customer, not to the number that carried it.
+		account_a = self._make_account("Number A", "15550002222")
+		account_b = self._make_account("Number B", "15550003333")
+		lead = frappe.get_doc(
+			{"doctype": "CRM Lead", "first_name": "Thread Test", "mobile_no": "+91 95663 72605"}
+		).insert(ignore_permissions=True)
+		incoming = frappe.get_doc(
+			{
+				"doctype": "WhatsApp Message",
+				"type": "Incoming",
+				"whatsapp_account": account_a.name,
+				"from": "+91 95663 72605",
+				"content_type": "text",
+				"message": "hello",
+			}
+		).insert(ignore_permissions=True)
+		outgoing = self._outgoing(to="+91 95663-72605", whatsapp_account=account_b.name)
+		for msg in (incoming, outgoing):
+			row = frappe.db.get_value(
+				"WhatsApp Message", msg.name, ["from", "to", "reference_doctype", "reference_name"], as_dict=True
+			)
+			self.assertEqual(row.get("from") or row.to, "919566372605")
+			self.assertEqual((row.reference_doctype, row.reference_name), ("CRM Lead", lead.name))
+
 	# G6: media messages need their file.
 
 	def test_media_without_attachment_rejected(self):

@@ -11,13 +11,15 @@ class WhatsAppMessage(Document):
 	def before_insert(self):
 		if self.type == "Outgoing":
 			self._validate_media_attached()
-			# Digits only, so the recipient matches inbound `from` and account numbers.
+			# Digits only (as inbound `from` below): threads are keyed by the
+			# customer's number, whichever of our accounts carried the message.
 			self.to = normalize_number(self.to) or self.to
 			self.message_type = "Template" if self.use_template else "Manual"
 			if not self.whatsapp_account:
 				self.whatsapp_account = pick_account(recipient=self.to)
 			self.status = "Queued"
 		else:
+			self.set("from", normalize_number(self.get("from")) or self.get("from"))
 			self.status = "Received"
 
 	def _validate_media_attached(self):
