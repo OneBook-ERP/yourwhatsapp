@@ -153,14 +153,14 @@ func TestRestoreFailsQueuedAfterGrace(t *testing.T) {
 	}
 
 	fire()
-	if rec := h.sendRow("m1"); rec.State != store.SendFailed || rec.ErrorCode != store.ErrCodeSendFailed {
+	if rec := h.sendRow("m1"); rec.State != store.SendFailed || rec.ErrorCode != store.ErrCodeRelayRestarted {
 		t.Errorf("m1 = %+v", rec)
 	}
 	if rec := h.sendRow("m2"); rec.State != store.SendQueued {
 		t.Errorf("m2 = %+v, want untouched", rec)
 	}
 	cbs := h.callbacks(outbox.MethodStatus)
-	if len(cbs) != 1 || cbs[0]["local_message_id"] != "m1" || cbs[0]["status"] != "Failed" || cbs[0]["error_code"] != "send_failed" {
+	if len(cbs) != 1 || cbs[0]["local_message_id"] != "m1" || cbs[0]["status"] != "Failed" || cbs[0]["error_code"] != "relay_restarted" {
 		t.Errorf("callbacks = %v", cbs)
 	}
 }

@@ -270,6 +270,32 @@ class TestRelayClient(IntegrationTestCase):
 		self.assertEqual(retry.relay_retry_count, 1)
 		self.assertFalse(json.loads(retry.attempted_accounts or "[]"))
 
+	def test_relay_restarted_retries_same_account(self):
+		# One linked number: the send a restart lost must not end Failed.
+		frappe.db.set_value("WhatsApp Account", self.account_b.name, "status", "Disconnected")
+		msg = self._make_message()
+		self._send(msg, relay_response(202))
+		api.message_status(
+			status="Failed",
+			local_message_id=msg.name,
+			error_code="relay_restarted",
+			error_reason="relay restarted before the message was sent",
+		)
+		failovers = [c for c in frappe.enqueue.call_args_list if c.args[0] == api.FAILOVER_METHOD]
+		self.assertEqual([c.kwargs["error_code"] for c in failovers], ["relay_restarted"])
+
+		with patch("requests.post") as post:
+			relay_client.handle_async_failure(msg.name, "relay_restarted")
+		post.assert_not_called()
+		row, retry = self._row(msg.name), self._retry_row(msg.name)
+		self.assertEqual((row.status, row.whatsapp_account), ("Queued", self.account_a.name))
+		self.assertEqual(retry.relay_retry_count, 1)
+		self.assertIsNotNone(retry.next_retry_at)
+
+		# The retry job's re-dispatch goes back to the same account.
+		post = self._send(msg, relay_response(202))
+		self.assertEqual(post.call_args.kwargs["json"]["session_id"], self.account_a.session_id)
+
 	def test_exhausted_failover_appends_reason(self):
 		msg = self._make_message()
 		self._send(msg, relay_response(202))

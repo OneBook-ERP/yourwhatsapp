@@ -175,9 +175,10 @@ func (m *Manager) FailLostSendsAfter(grace time.Duration) {
 	m.mu.Unlock()
 }
 
-// failLostSends reports every lost send as Failed. Each row is marked failed
-// only after its callback is in the outbox, so an error leaves the remaining
-// rows queued for the next boot.
+// failLostSends reports every lost send as Failed with relay_restarted, which
+// Frappe retries on the same account. Each row is marked failed only after
+// its callback is in the outbox, so an error leaves the remaining rows queued
+// for the next boot.
 func (m *Manager) failLostSends(ctx context.Context) error {
 	m.mu.Lock()
 	lost := m.lostSends
@@ -185,12 +186,12 @@ func (m *Manager) failLostSends(ctx context.Context) error {
 	m.mu.Unlock()
 	for _, r := range lost {
 		if err := m.enqueue(ctx, outbox.MethodStatus, statusPayload{
-			LocalMessageID: r.LocalID, Status: "Failed", ErrorCode: store.ErrCodeSendFailed,
+			LocalMessageID: r.LocalID, Status: "Failed", ErrorCode: store.ErrCodeRelayRestarted,
 			ErrorReason: "relay restarted before the message was sent",
 		}); err != nil {
 			return fmt.Errorf("enqueue failed send %s: %w", r.LocalID, err)
 		}
-		if _, err := m.st.MarkFailed(ctx, r.LocalID, r.SessionID, store.ErrCodeSendFailed); err != nil {
+		if _, err := m.st.MarkFailed(ctx, r.LocalID, r.SessionID, store.ErrCodeRelayRestarted); err != nil {
 			return fmt.Errorf("mark send %s failed: %w", r.LocalID, err)
 		}
 	}

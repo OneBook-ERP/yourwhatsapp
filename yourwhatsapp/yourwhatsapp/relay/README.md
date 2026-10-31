@@ -51,7 +51,7 @@ Every route except `/health` needs the `x-api-key` header. Responses are JSON.
 | `POST /session/:id/pause` | Disconnect and do not restore on boot. |
 | `POST /session/:id/resume` | Optional `{"proxy": ...}`. Returns `{"ok": true, "status": ...}`. |
 | `POST /session/:id/logout` | Unlink the device from WhatsApp, delete its keys and clear the pause. |
-| `POST /message/send` | `local_message_id` required. Asynchronous: **202** `{"state":"queued"}`; the result arrives later as a `message_status` callback. Errors: 400 `bad_request`, 422 `invalid_number`, 409 `session_unavailable`, 429 `temp_banned`; 200 `duplicate` for an already queued or sent id. Asynchronous failures carry `send_failed`, `session_unavailable`, `temp_banned`, or `send_unconfirmed` (the send errored after the message went out, so it may have been delivered; it carries `message_id` and is not failed over). |
+| `POST /message/send` | `local_message_id` required. Asynchronous: **202** `{"state":"queued"}`; the result arrives later as a `message_status` callback. Errors: 400 `bad_request`, 422 `invalid_number`, 409 `session_unavailable`, 429 `temp_banned`; 200 `duplicate` for an already queued or sent id. Asynchronous failures carry `send_failed`, `session_unavailable`, `temp_banned`, `relay_restarted` (a restart lost the queued send; Frappe retries it on the same account), or `send_unconfirmed` (the send errored after the message went out, so it may have been delivered; it carries `message_id` and is not failed over). |
 
 Status values: `not_started`, `qr_pending`, `pairing`, `connecting`, `connected`, `disconnected`, `logged_out`, `paused`, `temp_banned`.
 
@@ -61,7 +61,7 @@ Callbacks into Frappe (`yourwhatsapp.api`): `update_qr`, `inbound_message`, `mes
 
 - Only 1:1 chats (`@c.us` / `@lid`) are relayed. Status updates, groups, broadcast lists and channels are dropped.
 - Attachments are base64 in the request body (limit 25 MB); the relay never fetches URLs.
-- Sessions are restored from `relay.db` on boot, so a restart does not need re-scanning. Sends that were still queued when the relay stopped are reported Failed 30 s after it is listening again, so Frappe fails them over once the sessions have reconnected.
+- Sessions are restored from `relay.db` on boot, so a restart does not need re-scanning. Sends that were still queued when the relay stopped are reported Failed with `relay_restarted` 30 s after it is listening again; Frappe retries them on the same account (no failover) once the sessions have reconnected.
 - A proxy change (set or cleared in Frappe) applies when the relay next builds the account's client. `start` on a running session ignores it, so Pause, then Resume, a connected account to apply it.
 - Never run two relays against the same data dir or the same linked number: WhatsApp replaces the stream and the two fight.
 - `relay.db` holds the device keys. Anyone with a copy can act as the linked number: treat it and its backups like credentials, and never expose the relay port to the internet.

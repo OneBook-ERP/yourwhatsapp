@@ -16,6 +16,9 @@ const (
 	// ErrCodeSendUnconfirmed is recorded when the send errored after the
 	// message went out: WhatsApp may have delivered it.
 	ErrCodeSendUnconfirmed = "send_unconfirmed"
+	// ErrCodeRelayRestarted is recorded for sends a relay restart lost before
+	// they went out: the account itself is fine, so Frappe retries it.
+	ErrCodeRelayRestarted = "relay_restarted"
 )
 
 type SendRecord struct {

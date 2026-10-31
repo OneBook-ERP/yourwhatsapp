@@ -93,6 +93,12 @@ def handle_async_failure(message_name: str, error_code: str):
 	if doc.type != "Outgoing" or doc.status != "Failed":
 		return
 
+	if error_code == "relay_restarted":
+		# The account is fine, the relay just lost the queued send: retry it
+		# there later instead of failing over (it may be the only number).
+		_retry_later(doc, f"Relay error: {error_code}")
+		return
+
 	_remember_attempt(doc, doc.whatsapp_account)
 	# message_status only applies a Failed callback while the message is Queued.
 	doc.db_set("status", "Queued")
