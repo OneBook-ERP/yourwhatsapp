@@ -229,3 +229,25 @@ func TestFrappePosterHeaders(t *testing.T) {
 		t.Errorf("path=%q key=%q host=%q type=%q body=%q", gotPath, gotKey, gotHost, gotType, gotBody)
 	}
 }
+
+// A redirect (e.g. to a login page) must not be followed: the 302 itself is
+// the answer, and Decide dead-letters it.
+func TestFrappePosterDoesNotFollowRedirects(t *testing.T) {
+	var followed bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" {
+			followed = true
+			w.WriteHeader(200)
+			return
+		}
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+	defer srv.Close()
+	status, err := NewFrappePoster(srv.URL, "", "secret").Post(context.Background(), MethodQR, []byte(`{}`))
+	if err != nil || status != http.StatusFound || followed {
+		t.Fatalf("status=%d err=%v followed=%v", status, err, followed)
+	}
+	if action, _ := Decide(status, nil, store.OutboxRow{CreatedAt: time.Now()}, time.Now()); action != ActionDead {
+		t.Errorf("Decide(302) = %v, want dead", action)
+	}
+}

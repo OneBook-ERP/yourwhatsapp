@@ -30,7 +30,12 @@ type frappePoster struct {
 
 func NewFrappePoster(baseURL, siteName, apiKey string) Poster {
 	return &frappePoster{
-		client:   &http.Client{Timeout: 30 * time.Second},
+		client: &http.Client{
+			Timeout: 30 * time.Second,
+			// A redirect (e.g. to a login page) is an answer, not a hop: it
+			// must not turn a POST into a GET that "succeeds" with 200.
+			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		},
 		baseURL:  strings.TrimRight(baseURL, "/"),
 		siteName: siteName,
 		apiKey:   apiKey,
