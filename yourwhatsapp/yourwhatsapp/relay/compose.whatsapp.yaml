@@ -9,13 +9,18 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     environment:
-      # Frappe's internal address as seen from this container (frappe_docker: the frontend service).
-      FRAPPE_BASE_URL: http://frontend:8080
-      # Site name, sent as the Host header so the callback reaches the right site.
-      FRAPPE_SITE_NAME: ${SITE_NAME:?set SITE_NAME}
-      # Must equal WhatsApp Settings.relay_api_key on the site.
-      RELAY_API_KEY: ${RELAY_API_KEY:?set RELAY_API_KEY}
+      # The relay boots unclaimed and is claimed from WhatsApp Settings -> Connect Relay.
+      # Recommended: a bootstrap token, so only someone holding it can claim the relay.
+      # Generate: python3 -c "import secrets;print(secrets.token_urlsafe(32))"
+      RELAY_BOOTSTRAP_TOKEN: ${RELAY_BOOTSTRAP_TOKEN:-}
       RELAY_HOST: 0.0.0.0
+      # Optional fallbacks, used only in env mode (RELAY_API_KEY set). A claimed relay
+      # takes its callback URL and Host from the claim instead.
+      # FRAPPE_BASE_URL: http://frontend:8080
+      # FRAPPE_SITE_NAME: ${SITE_NAME}
+      # Legacy/env mode: pins the key in env and disables claiming (must equal
+      # WhatsApp Settings.relay_api_key).
+      # RELAY_API_KEY: ${RELAY_API_KEY:?set RELAY_API_KEY}
     volumes:
       - whatsapp-relay-data:/data
 

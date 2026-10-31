@@ -41,13 +41,13 @@ RELAY_API_KEY=<key> FRAPPE_BASE_URL=http://127.0.0.1:8001 RELAY_PORT=8800 \
   RELAY_DATA_DIR=$PWD/data bin/relay
 ```
 
-At cutover the bench `Procfile` `relay:` line (a bench-local file, not in git; deliberately not changed yet) becomes:
+The bench `Procfile` (bench-local, not in git) already runs the Go relay since the 2026-10-31 cutover:
 
 ```
 relay: apps/yourwhatsapp/yourwhatsapp/yourwhatsapp/relay/bin/relay
 ```
 
-with `<bench>/.env` providing `RELAY_API_KEY`, `FRAPPE_BASE_URL=http://127.0.0.1:8001`, `RELAY_PORT=8800` and `RELAY_DATA_DIR=<abs path>/relay/data`. Env vars and routes: `yourwhatsapp/relay/README.md`. Production (Docker): `DEPLOYMENT.md`.
+`<bench>/.env` provides `RELAY_API_KEY`, `FRAPPE_BASE_URL=http://127.0.0.1:8001`, `RELAY_PORT=8800` and `RELAY_DATA_DIR=<abs path>/relay/data`. Because `RELAY_API_KEY` is set, the dev relay runs in **env mode** ("pre-claimed"): `/claim` answers 409, and `/claim/rotate` and `/claim/callback` answer 409 `env_mode`. Production relays normally start **unclaimed** and are claimed from Settings (see `DEPLOYMENT.md`). Modes, routes and env vars: `yourwhatsapp/relay/README.md`.
 
 ### Node relay (until cutover)
 
@@ -59,9 +59,9 @@ RELAY_API_KEY=<key> FRAPPE_BASE_URL=http://127.0.0.1:8001 RELAY_PORT=8800 \
   node server.js
 ```
 
-On this bench the relay env vars live in `<bench>/.env`, which honcho loads for the `relay` Procfile entry — `bench start` brings the relay up with everything else (currently the Node relay).
+On this bench the relay env vars live in `<bench>/.env`, which honcho loads for the `relay` Procfile entry — `bench start` brings the relay up with everything else (the Go relay).
 
-`WhatsApp Settings` needs: `relay_base_url` (e.g. `http://localhost:8800`) and `relay_api_key` (same value as `RELAY_API_KEY` above). `relay_reachable_frappe_url` is **not read by any code** — the relay uses its own `FRAPPE_BASE_URL` env var. Phase 1.6 either repurposes or removes that field.
+`WhatsApp Settings` needs `relay_base_url` (e.g. `http://localhost:8800`) and `relay_api_key`. For the env-mode dev relay, type the `RELAY_API_KEY` value into `relay_api_key` by hand (the panel says so). For a claimed relay, **Connect Relay** generates and stores the key. `relay_reachable_frappe_url` is the **Callback URL** sent to the relay on claim (and by **Update Callback URL**); empty means `frappe.utils.get_url()`. On this host use `http://127.0.0.1:<port>`, since `.localhost` names don't resolve from the relay process. In env mode the relay ignores it and uses its own `FRAPPE_BASE_URL` / `FRAPPE_SITE_NAME`. The claim UI needs MariaDB (`GET_LOCK`). Template `{{n}}` placeholders are mapped to reference-document fields on the template's Parameters table; sending rotates across Active numbers, and the Settings default account is auto-filled (CRM only checks that it is set).
 
 Pairing: create a `WhatsApp Account`, then either click **Connect / Generate QR** on its form, or `POST /session/<session_id>/start` on the relay directly. Scan the QR shown on the account's `qr_code` field from a phone (WhatsApp → Linked Devices).
 

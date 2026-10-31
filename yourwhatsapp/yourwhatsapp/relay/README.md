@@ -29,22 +29,37 @@ RELAY_API_KEY=<key> FRAPPE_BASE_URL=http://127.0.0.1:8001 RELAY_PORT=8800 \
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `RELAY_API_KEY` | required | Shared secret; must equal `WhatsApp Settings.relay_api_key`. The relay refuses to start without it. |
-| `FRAPPE_BASE_URL` | `http://127.0.0.1:8001` | Where callbacks are POSTed. Use `127.0.0.1`, since `.localhost` names do not resolve from the relay process. |
-| `FRAPPE_SITE_NAME` | empty | Sent as the `Host` header on callbacks, for multi-site or container setups (e.g. `crm.example.com`). |
+| `RELAY_API_KEY` | empty | Optional. When set, the relay is in **env mode**: the key comes from env and must equal `WhatsApp Settings.relay_api_key`. When empty, the relay uses its stored claim or waits to be claimed. |
+| `RELAY_BOOTSTRAP_TOKEN` | empty | Optional but recommended for unclaimed production relays: `POST /claim` must carry it as `bootstrap_token`. Use `python3 -c "import secrets;print(secrets.token_urlsafe(32))"`; `/claim` is not throttled. |
+| `FRAPPE_BASE_URL` | `http://127.0.0.1:8001` | Callback base URL, **env mode only** (a claimed relay uses the callback URL from its claim). Use `127.0.0.1`, since `.localhost` names do not resolve from the relay process. |
+| `FRAPPE_SITE_NAME` | empty | Env mode only: sent as the `Host` header on callbacks (e.g. `crm.example.com`). A claimed relay uses the claim's `site_name`. |
 | `RELAY_HOST` | `127.0.0.1` | Listen address. `0.0.0.0` in Docker. |
 | `RELAY_PORT` | `8800` | Listen port (named `RELAY_PORT`, not `PORT`, which collides). |
 | `RELAY_DATA_DIR` | `./data` | Holds `relay.db`. Back it up. |
 | `SEND_DELAY_MIN` / `SEND_DELAY_MAX` | `4s` / `12s` | Per-account random delay between outgoing messages (Go durations). |
 | `MEDIA_MAX_BYTES` | `15728640` (15 MiB) | Largest inbound attachment the relay downloads and forwards. Bigger media arrives as text with an `[attachment too large: <name or type>, <n> MB]` note. Keep it at or below Frappe's max file size. |
 
+## Modes
+
+| Mode | When | Behaviour |
+|---|---|---|
+| `env` | `RELAY_API_KEY` is set | Key, callback URL and Host come from env. `/claim` answers 409 `already_claimed`; `/claim/rotate` and `/claim/callback` answer 409 `env_mode`. Dev bench and back-compat. |
+| `claimed` | no env key, `relay_config` row in `relay.db` | Key, callback URL and site name come from the claim. |
+| `unclaimed` | no env key, no claim | Only `/health`, `POST /claim` and `GET /info` work; every other route answers 503 `{"error":"unclaimed"}`. No sessions are restored and the outbox worker is idle. A successful claim starts both without a restart. |
+
+A data dir that already holds linked numbers (accounts, devices or outbox rows) but has no claim refuses to start unless `RELAY_API_KEY` or `RELAY_BOOTSTRAP_TOKEN` is set, so an exposed port can't be used to take over live numbers. With the token set, the claim must carry it. Fresh volumes are unaffected.
+
 ## Routes
 
-Every route except `/health` needs the `x-api-key` header. Responses are JSON.
+Every route except `/health`, `POST /claim` and `GET /info` needs the `x-api-key` header. Responses are JSON.
 
 | Method & path | Notes |
 |---|---|
 | `GET /health` | `{"ok":true}`. No auth. |
+| `POST /claim` | Unclaimed only. Body `{api_key, callback_url, site_name, bootstrap_token?}` returns 200 `{"claimed":true}`. Errors: 409 `already_claimed`, 401 `bad_bootstrap_token`, 400 `bad_request` (key under 32 chars; callback URL not http(s), or carrying credentials, a query or a fragment). |
+| `POST /claim/rotate` | Needs the **current** key. Body `{api_key}` (new, 32+ chars). The new key applies at once for auth and callbacks; the old key is still accepted for other routes for a 10-minute grace window, but cannot rotate or change the callback. Retrying a rotation the relay already applied (grace key plus the current key in the body) is a 200 no-op. 409 `env_mode`, 503 `unclaimed`, 401 bad key. |
+| `PUT /claim/callback` | Needs the current key. Body `{callback_url, site_name}`. 409 `env_mode`, 400 `bad_request`, 401. |
+| `GET /info` | No key: `{version, claimed, mode}`. With a valid key (current or grace) also `sessions {connected, total}` (live connected sessions / linked numbers), `outbox {pending, dead}`, `callback_url` (credentials redacted) and `site_name`. Never returns a key. |
 | `POST /session/:id/start` | Optional `{"proxy": ...}` (`""` clears the stored proxy, absent/`null` keeps it). Creates the account if new; connects if paired, otherwise starts the QR flow. Idempotent: on a connected session it returns `connected` and pushes `Active` to Frappe again. |
 | `POST /session/:id/pair-code` | `{"phone": "+91 98765 43210"}` returns `{"code": "ABCD-1234"}`. Session must be unpaired. |
 | `GET /session/:id/status` | `{"status", "jid", "phone"}` |
@@ -52,6 +67,8 @@ Every route except `/health` needs the `x-api-key` header. Responses are JSON.
 | `POST /session/:id/resume` | Optional `{"proxy": ...}`. Returns `{"ok": true, "status": ...}`. |
 | `POST /session/:id/logout` | Unlink the device from WhatsApp, delete its keys and clear the pause. |
 | `POST /message/send` | `local_message_id` required. Asynchronous: **202** `{"state":"queued"}`; the result arrives later as a `message_status` callback. Errors: 400 `bad_request`, 422 `invalid_number`, 409 `session_unavailable`, 429 `temp_banned`; 200 `duplicate` for an already queued or sent id. Asynchronous failures carry `send_failed`, `session_unavailable`, `temp_banned`, `relay_restarted` (a restart lost the queued send; Frappe retries it on the same account), or `send_unconfirmed` (the send errored after the message went out, so it may have been delivered; it carries `message_id` and is not failed over). |
+
+`version` is stamped at build time (`make build` uses `git describe`; `-ldflags "-X main.version=..."`) and is `dev` otherwise, including in the stock Dockerfile build.
 
 Status values: `not_started`, `qr_pending`, `pairing`, `connecting`, `connected`, `disconnected`, `logged_out`, `paused`, `temp_banned`.
 
@@ -65,5 +82,5 @@ Callbacks into Frappe (`yourwhatsapp.api`): `update_qr`, `inbound_message`, `mes
 - A proxy change (set or cleared in Frappe) applies when the relay next builds the account's client. `start` on a running session ignores it, so Pause, then Resume, a connected account to apply it.
 - Never run two relays against the same data dir or the same linked number: WhatsApp replaces the stream and the two fight.
 - `relay.db` holds the device keys. Anyone with a copy can act as the linked number: treat it and its backups like credentials, and never expose the relay port to the internet.
-- The Frappe side of claiming (WhatsApp Settings → Relay → Connect / Rotate / Retry) serialises key changes with a MariaDB named lock (`GET_LOCK`), so it requires a MariaDB-backed site.
+- The Frappe side of claiming (WhatsApp Settings → Relay → Connect / Rotate / Retry) serialises key changes with a MariaDB named lock (`GET_LOCK`), so the claim UI requires a MariaDB-backed site. Env-mode relays work on any database.
 - Logs are JSON on stdout with `session_id` on per-account lines. Message bodies, media, QR codes and keys are never logged.

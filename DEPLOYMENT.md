@@ -38,12 +38,15 @@ Copy `yourwhatsapp/yourwhatsapp/relay/compose.whatsapp.yaml` next to your frappe
 
 ```bash
 export SITE_NAME=crm.example.com
-export RELAY_API_KEY=$(openssl rand -hex 32)   # keep it, you need it in step 4
+# Recommended: only someone holding this token can claim the relay in step 4.
+# Keep it, you need it in step 4. /claim is not throttled, so use a long random value.
+export RELAY_BOOTSTRAP_TOKEN=$(python3 -c "import secrets;print(secrets.token_urlsafe(32))")
 docker compose -f compose.yaml -f overrides/compose.mariadb.yaml -f overrides/compose.redis.yaml \
   -f compose.whatsapp.yaml up -d
 ```
 
-- `FRAPPE_BASE_URL` is the address of Frappe's internal web service as seen from the relay (frappe_docker: `http://frontend:8080`). `FRAPPE_SITE_NAME` is sent as the `Host` header so the callback hits the right site.
+- No `RELAY_API_KEY` is needed: the relay starts **unclaimed** and is claimed from the Desk in step 4. The callback URL and `Host` header come from the claim. `FRAPPE_BASE_URL` / `FRAPPE_SITE_NAME` are optional fallbacks for env mode, and setting `RELAY_API_KEY` (commented out in the compose file as legacy/env mode) pins the key in env and disables claiming.
+- A relay whose volume already holds linked numbers but has no claim (for example after moving from env mode) refuses to start unless `RELAY_BOOTSTRAP_TOKEN` or `RELAY_API_KEY` is set. This stops anyone who can reach the port from claiming live numbers.
 - No ports are published. Only containers on the compose network (your Frappe services) reach the relay. Never expose port 8800 to the internet: with the key, anyone can send messages as your numbers.
 - `stop_grace_period: 30s` lets the relay close WhatsApp sessions cleanly. Do not shorten it, and avoid `docker kill` on a live relay: repeated abrupt disconnects can get a device unlinked.
 - Run exactly one relay per data volume.
@@ -52,14 +55,48 @@ docker compose -f compose.yaml -f overrides/compose.mariadb.yaml -f overrides/co
 
 ## 4. WhatsApp Settings
 
-In Frappe desk open **WhatsApp Settings** and set:
+The claim UI needs a MariaDB site (it serialises key changes with `GET_LOCK`). In Desk, as a System Manager, open **WhatsApp Settings**:
 
-- `relay_base_url`: `http://whatsapp-relay:8800`
-- `relay_api_key`: the same value as `RELAY_API_KEY`
+1. **Relay Base URL**: `http://whatsapp-relay:8800`.
+2. **Callback URL**: Frappe as the relay sees it, e.g. `http://frontend:8080` (empty falls back to the site's own URL, which is rarely reachable from inside Docker). The relay sends inbound messages and status updates here, with the site name as `Host`.
+3. **Relay Bootstrap Token**: the `RELAY_BOOTSTRAP_TOKEN` value, if you set one.
+4. Save, then **Relay, Connect Relay**. Frappe generates a random key, stores it in `relay_api_key` and claims the relay. You never see or type the key.
+
+The **Relay Status** panel (and **Relay, Test Connection**) shows the state:
+
+| State | Meaning |
+|---|---|
+| Connected | Relay reachable and the key is accepted. Also shows mode, version, numbers connected / linked, callbacks pending / dead, callback URL and site name. |
+| Unreachable | Connection error or timeout. Check the Relay Base URL and that the container is up. |
+| Key rejected | The relay answered 401: its key is not the one stored here. See recovery below. |
+| Unclaimed | The relay is waiting for **Connect Relay**. |
+
+Day-two buttons (shown when the relay is claimed and connected):
+
+- **Rotate Key**: generates a new key and swaps it in. The old key keeps working for other routes for 10 minutes, then is refused.
+- **Update Callback URL**: after changing the Callback URL field, pushes it to the relay without re-claiming.
+- **Retry Pending Key**: appears if a Connect or Rotate was sent but its answer was lost (the panel warns about it). Retrying finishes the same change; do it before anything else.
+
+If the relay reports `already_claimed` on Connect, it was claimed before. If the claim is yours, use Rotate Key. If the relay says its key comes from `RELAY_API_KEY` (env mode), type that value into **Relay API Key** by hand; the field is editable only for that case.
+
+**Recovery from "Key rejected"** (key lost, relay claimed by another site, restored old backup): the claim is stored in the relay volume, so reset it. Stop the relay, wipe its volume, start it, and click **Connect Relay** again. Wiping the volume also deletes the device keys, so **every number must be relinked** (step 5). There is no other way to reclaim a relay without its key.
+
+## Template parameters
+
+CRM sends templates with their `{{1}}`, `{{2}}`... placeholders. Each template needs parameter rows so these are filled from the message's reference document (Lead, Deal, Customer, Sales Order, any doctype):
+
+- On the **WhatsApp Templates** form, add one row per placeholder in **Parameters**: `Placeholder` (1, 2, ...), `Field`, optional `Default Value`.
+- `Field` is a fieldname on the reference doctype, or `link_field.target_field` for one level of link, e.g. `organization` or `lead.first_name` on a Deal.
+- Not allowed as sources: Password, Attach, Attach Image, Code, Signature, Geolocation, JSON, table and layout fields, and User fields other than `full_name`, `first_name`, `last_name`.
+- Saving the template fails if a `{{n}}` has no row, numbering has gaps, or a field does not exist on the template's doctype.
+- A message with no reference document falls back to the CRM Lead / Deal matched by phone number.
+- The `Default Value` is used when the field is empty. If there is still no value, no row, or no reference document, **the send is blocked** with an error naming the placeholders (for example "needs {{2}} (organization) but CRM Lead LEAD-0001 has no value"). Nothing ever goes out with a literal `{{1}}`.
 
 ## 5. Link numbers
 
 Create a **WhatsApp Account** per number, then click **Connect / Generate QR** and scan from WhatsApp, Linked Devices, Link a device. Alternatively use the pairing-code option on the account form, enter the phone number, and type the code into the phone (Linked Devices, Link with phone number instead). Sessions are stored in the volume and restored on restart: no re-scan needed.
+
+Default number: you do not choose one. WhatsApp Settings' **Default Outgoing / Incoming Account** exist only so CRM shows WhatsApp; they are filled automatically with the first account that becomes Active (and refilled if they point at a deleted account). Sending rotates across all Active numbers, regardless of that field, and replies do not stick to one number.
 
 Proxy: set **Proxy** on the account before connecting. Changing or clearing it later applies only on the next connect: click **Pause**, then **Resume**.
 
@@ -93,5 +130,5 @@ This setup uses an unofficial client. WhatsApp can restrict, temporarily ban or 
 Managed Frappe hosting (e.g. Frappe Cloud) does not let you add a sidecar container. Run the relay on a separate host (a small VM with Docker works) and point `relay_base_url` at it. Then:
 
 - Put it behind TLS and restrict access (firewall to your Frappe host's IP, or a private network/VPN). The API key is the only other defence.
-- Set `FRAPPE_BASE_URL` to your site's public HTTPS URL, reachable from the relay host; `FRAPPE_SITE_NAME` is usually unnecessary then.
+- Set the **Callback URL** in WhatsApp Settings to your site's public HTTPS URL, reachable from the relay host, before **Connect Relay**. The site name sent as `Host` is then usually irrelevant. Set `RELAY_BOOTSTRAP_TOKEN`, since the port is reachable from outside the compose network.
 - Publish the port only on the private interface or behind the reverse proxy; the same backup and one-relay-per-volume rules apply.

@@ -46,9 +46,9 @@ Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`. Compariso
 ### A. Docker deployment + UI-only setup
 - [x] 🚫 Relay Docker image (`relay/Dockerfile`): static Go binary, non-root, `/data` volume (→ §0; was Node + Chromium + tini).
 - [x] 🚫 Example compose service (`whatsapp-relay`): no published port (internal docker network only), sessions volume, `stop_grace_period: 30s`, healthcheck.
-- [ ] 🚫 **Relay claim flow — no terminal needed for the key.** Relay boots unclaimed (no `RELAY_API_KEY` env required). System Manager enters relay URL in `WhatsApp Settings` → **Connect Relay** → Frappe generates a random key, POSTs it to relay `/claim` along with its callback URL + site name; relay persists it in its volume and rejects any further claims. Key stored in `relay_api_key` (Password). Optional `RELAY_BOOTSTRAP_TOKEN` env to require a token for claiming. Reset = wipe relay volume.
-- [ ] 🚫 Relay sends callbacks with `Host: <site name>` so multi-site benches route correctly; callback URL comes from the claim, replacing the `FRAPPE_BASE_URL` env var. Repurpose (or remove) the currently-unused `relay_reachable_frappe_url` field.
-- [ ] Settings page relay panel: connection status, relay version, session count, **Test Connection**, **Rotate Key**.
+- [x] 🚫 **Relay claim flow — no terminal needed for the key.** Relay boots unclaimed (no `RELAY_API_KEY` env required). System Manager enters relay URL in `WhatsApp Settings` → **Connect Relay** → Frappe generates a random key, POSTs it to relay `/claim` along with its callback URL + site name; relay persists it in its volume and rejects any further claims. Key stored in `relay_api_key` (Password). Optional `RELAY_BOOTSTRAP_TOKEN` env to require a token for claiming. Reset = wipe relay volume. (Done: `/claim`, `/claim/rotate`, `/claim/callback`, `/info`; a populated volume refuses to start unclaimed without the token.)
+- [x] 🚫 Relay sends callbacks with `Host: <site name>` so multi-site benches route correctly; callback URL comes from the claim, replacing the `FRAPPE_BASE_URL` env var. `relay_reachable_frappe_url` is now the Callback URL sent on claim. Env vars remain as the fallback for env mode.
+- [x] Settings page relay panel: connection status, relay version, session count, **Test Connection**, **Rotate Key**.
 - [x] `GET /health` on the relay (unauthenticated, no data) for the docker healthcheck (→ §0).
 - [x] `RELAY_HOST` bind option (default `0.0.0.0` in Docker, `127.0.0.1` for bare-metal installs) (→ §0).
 - [ ] Setup guide (`DEPLOYMENT.md`): compose snippet, Settings walkthrough, pairing, backup of the sessions volume.
@@ -80,11 +80,11 @@ Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`. Compariso
 - [x] Status updates (`status@broadcast`), groups (`@g.us`), broadcast lists and channels no longer stored as inbound CRM messages — relay filters to 1:1 chats only. Existing rows kept.
 - [x] Acks for messages CRM didn't send (typed on the phone, groups) no longer raise `DoesNotExistError` into Error Log.
 - [x] 🚫 (→ §0) Normalize outgoing numbers to digits only (`+91 98765 43210` → `919876543210`) and validate with `client.getNumberId()` before sending — `+`-prefixed numbers currently fail with 502.
-- [ ] 🚫 `crm.api.whatsapp.send_whatsapp_template` sends no parameters → templates go out with literal `{{1}}`. Resolve params from the reference doc (or block templates with unresolved placeholders).
+- [x] 🚫 `crm.api.whatsapp.send_whatsapp_template` sends no parameters → templates go out with literal `{{1}}`. Resolve params from the reference doc (or block templates with unresolved placeholders). Done: `WhatsApp Template Parameter` rows map `{{n}}` to a field or `link.field`, with default values; a missing value blocks the send.
 - [ ] Reactions (`content_type: reaction`) are sent as a plain text emoji — use `msg.react()` on the target message.
 - [ ] Replies: pass `quotedMessageId` on outgoing replies; send `reply_to_message_id` on inbound quoted messages so CRM shows reply context.
 - [x] (→ §0) Unresolvable `@lid` senders are stored as a fake phone number (e.g. `157844527657214`) — store the raw lid in a separate field and flag it instead.
-- [ ] `default_outgoing_account` (Settings) vs `is_default_outgoing` (Account) duplication; CRM's `is_whatsapp_enabled` requires the Settings one — routing ignores both. Pick one and document it; setup must set it or CRM hides WhatsApp entirely.
+- [x] `default_outgoing_account` (Settings) vs `is_default_outgoing` (Account) duplication; CRM's `is_whatsapp_enabled` requires the Settings one — routing ignores both. Done: per-account checkboxes removed; the Settings default is auto-filled with an Active account (CRM only checks that it is set).
 
 ### F. Minimum anti-ban before real volume (subset of Phase 3)
 - [x] ~~Per-account realistic user-agent~~ — moot with whatsmeow (no browser); device props set in §0.
