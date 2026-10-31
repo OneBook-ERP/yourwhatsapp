@@ -18,7 +18,7 @@ class WhatsAppMessage(Document):
 		if self.type == "Outgoing":
 			frappe.enqueue(
 				"yourwhatsapp.yourwhatsapp.relay_client.send_message",
-				queue="short",
+				queue="long",
 				message_name=self.name,
 				enqueue_after_commit=True,
 			)

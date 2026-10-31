@@ -1,12 +1,9 @@
 import hmac
-from datetime import datetime
-from zoneinfo import ZoneInfo
-
 import frappe
-from frappe.utils import get_datetime, get_system_timezone, now_datetime
+from frappe.utils import get_datetime, now_datetime
 
 from yourwhatsapp.yourwhatsapp.relay_client import increment_daily_count
-from yourwhatsapp.yourwhatsapp.routing import mark_rate_limited
+from yourwhatsapp.yourwhatsapp.routing import mark_rate_limited, to_system_datetime
 
 STATUS_RANK = {"Queued": 0, "Sent": 1, "Delivered": 2, "Read": 3}
 FAILOVER_ERROR_CODES = {"session_unavailable", "send_failed", "temp_banned"}
@@ -144,7 +141,9 @@ def _find_message(message_id: str | None, local_message_id: str | None) -> str |
 
 def _apply_failure(name: str, current: str | None, error_reason: str | None, error_code: str | None):
 	# Only a message still waiting on the relay can fail; once it was Sent (or a
-	# failure was already handled) a late Failed callback is noise.
+	# failure was already handled) a late Failed callback is noise. Re-read under
+	# a row lock so concurrent callbacks and the failover job see one another.
+	current = frappe.db.get_value("WhatsApp Message", name, "status", for_update=True)
 	if current != "Queued":
 		return {"ok": False, "reason": "not failable"}
 
@@ -173,16 +172,8 @@ def account_event(session_id: str, event: str, until: str | None = None):
 	if event != "temp_banned":
 		return {"ok": False, "reason": "unknown event"}
 
-	mark_rate_limited(account, _to_system_datetime(until) if until else None)
+	mark_rate_limited(account, to_system_datetime(until) if until else None)
 	return {"ok": True}
-
-
-def _to_system_datetime(rfc3339: str) -> datetime:
-	"""RFC3339 from the relay -> naive datetime in the system timezone, as Datetime fields expect."""
-	parsed = datetime.fromisoformat(rfc3339.replace("Z", "+00:00"))
-	if parsed.tzinfo is None:
-		return parsed
-	return parsed.astimezone(ZoneInfo(get_system_timezone())).replace(tzinfo=None)
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])

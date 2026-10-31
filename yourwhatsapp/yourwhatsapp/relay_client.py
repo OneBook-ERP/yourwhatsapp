@@ -1,10 +1,13 @@
 import json
+import re
+import time
 
 import frappe
 import requests
 
-from yourwhatsapp.yourwhatsapp.routing import mark_rate_limited, pick_account
+from yourwhatsapp.yourwhatsapp.routing import mark_rate_limited, pick_account, to_system_datetime
 
+DISPATCH_BUDGET_SECONDS = 240
 TIMEOUT = 30  # the relay only queues the send, so a slow answer means trouble
 
 
@@ -72,7 +75,8 @@ def send_message(message_name: str):
 
 def handle_async_failure(message_name: str, error_code: str):
 	"""Re-dispatch a message the relay accepted but then failed to send (api.message_status enqueues this)."""
-	doc = frappe.get_doc("WhatsApp Message", message_name)
+	# Row lock: attempted_accounts is read-modify-written below.
+	doc = frappe.get_doc("WhatsApp Message", message_name, for_update=True)
 	if doc.type != "Outgoing" or doc.status != "Failed":
 		return
 
@@ -157,20 +161,36 @@ def _error_code(response) -> str | None:
 		return None
 
 
+def _ban_expiry(response):
+	"""The relay's 429 detail ends with 'temporarily banned until <RFC3339>'."""
+	try:
+		detail = response.json().get("detail") or ""
+		match = re.search(r"\d{4}-\d\d-\d\dT[\d:.]+(?:Z|[+-]\d\d:\d\d)", detail)
+		return to_system_datetime(match.group(0)) if match else None
+	except Exception:
+		return None
+
+
 def _dispatch(doc):
+	started = time.monotonic()
 	try:
 		base_url, api_key = relay_settings()
 	except RelayNotConfigured as e:
 		_fail(doc, str(e))
 		return
 
+	previous_account = None
 	while True:
+		if previous_account and time.monotonic() - started > DISPATCH_BUDGET_SECONDS:
+			_fail(doc, "relay unreachable; dispatch time budget exhausted")
+			return
 		account = frappe.get_doc("WhatsApp Account", doc.whatsapp_account)
 		_remember_attempt(doc, account.name)
 
 		try:
 			response = _post(doc, account, base_url, api_key)
 		except requests.exceptions.RequestException as e:
+			previous_account = account.name
 			if not _switch_account(doc, f"Relay unreachable: {e}"):
 				return
 			continue
@@ -179,12 +199,16 @@ def _dispatch(doc):
 		if status in (200, 202):
 			# 202: queued, the Sent/Failed verdict arrives via message_status.
 			# 200 duplicate: the relay already has this message; nothing to do.
+			if status == 200 and previous_account:
+				# The earlier account (e.g. after a timeout) actually holds the send.
+				doc.db_set("whatsapp_account", previous_account)
 			return
 		code = _error_code(response)
 		if status in (400, 422):
 			_fail(doc, f"Relay rejected message: {code or status}")
 			return
 		if status == 429:
-			mark_rate_limited(account.name)
+			mark_rate_limited(account.name, _ban_expiry(response))
+		previous_account = account.name
 		if not _switch_account(doc, f"Relay error: {code or status}"):
 			return

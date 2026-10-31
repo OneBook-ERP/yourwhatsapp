@@ -7,6 +7,7 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, now_datetime
 
 from yourwhatsapp.yourwhatsapp import api, relay_client, tasks
+from yourwhatsapp.yourwhatsapp.routing import to_system_datetime
 
 RELAY_KEY = "test-relay-key"
 
@@ -112,9 +113,12 @@ class TestRelayClient(IntegrationTestCase):
 
 	def test_429_sets_rate_limited_and_fails_over(self):
 		msg = self._make_message()
-		self._send(msg, relay_response(429, {"error": "temp_banned"}), relay_response(202))
+		ban = {"error": "temp_banned", "detail": "temporarily banned until 2030-01-02T03:04:05Z"}
+		expected_until = to_system_datetime("2030-01-02T03:04:05Z")
+		self._send(msg, relay_response(429, ban), relay_response(202))
 		self.assertEqual(self._account_value(self.account_a, "status"), "RateLimited")
 		self.assertEqual(self._row(msg.name).whatsapp_account, self.account_b.name)
+		self.assertEqual(self._account_value(self.account_a, "rate_limited_until"), expected_until)
 
 	def test_timeout_retries_same_account_once(self):
 		msg = self._make_message()
@@ -132,6 +136,24 @@ class TestRelayClient(IntegrationTestCase):
 		)
 		self.assertEqual(post.call_count, 3)
 		self.assertEqual(self._row(msg.name).whatsapp_account, self.account_b.name)
+
+	def test_duplicate_during_failover_keeps_original_account(self):
+		msg = self._make_message()
+		self._send(
+			msg, requests.exceptions.ReadTimeout(), requests.exceptions.ReadTimeout(), relay_response(200, {"error": "duplicate"})
+		)
+		row = self._row(msg.name)
+		self.assertEqual((row.status, row.whatsapp_account), ("Queued", self.account_a.name))
+
+	def test_dispatch_time_budget_exhausted_fails(self):
+		msg = self._make_message()
+		clock = iter([0, 241])
+		with patch.object(relay_client, "time", MagicMock(monotonic=lambda: next(clock))):
+			post = self._send(msg, relay_response(409, {"error": "session_unavailable"}))
+		self.assertEqual(post.call_count, 1)
+		row = self._row(msg.name)
+		self.assertEqual(row.status, "Failed")
+		self.assertEqual(row.error_reason, "relay unreachable; dispatch time budget exhausted")
 
 	def test_connection_error_fails_over_without_retry(self):
 		msg = self._make_message()
