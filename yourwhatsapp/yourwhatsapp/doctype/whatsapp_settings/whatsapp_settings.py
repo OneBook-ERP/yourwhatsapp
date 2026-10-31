@@ -1,4 +1,5 @@
 import secrets
+from contextlib import contextmanager
 
 import frappe
 import requests
@@ -8,6 +9,7 @@ from frappe.utils.password import remove_encrypted_password, set_encrypted_passw
 
 DOCTYPE = "WhatsApp Settings"
 TIMEOUT = 15
+KEY_LOCK_TIMEOUT = 10  # seconds to wait for another key change to commit its pending key
 ALREADY_CLAIMED = (
 	"This relay is already claimed. If it's yours, use Rotate Key with the current key, "
 	"or reset the relay's volume."
@@ -20,7 +22,13 @@ ENV_MODE_CALLBACK = (
 	"This relay takes its callback URL from its FRAPPE_BASE_URL environment variable; change it there."
 )
 KEY_PENDING = "A key change is still pending. Use Retry first so this site and the relay agree on the key."
-# Answers that prove the relay did not take the key: no point keeping it for Retry.
+KEY_CHANGE_BUSY = "Another relay key change is in progress. Try again in a moment."
+KEYS_REJECTED = (
+	"The relay rejects both the current and the pending key. The pending key is kept. "
+	"If this relay is yours, reset the relay's volume and use Retry."
+)
+# Answers that prove the relay refused this request, once /info confirms it
+# doesn't take the pending key either.
 REFUSALS = {
 	"already_claimed": ALREADY_CLAIMED,
 	"bad_bootstrap_token": "The relay rejected the bootstrap token.",
@@ -40,31 +48,38 @@ class WhatsAppSettings(Document):
 			return _failed(_unreachable(exc), self._known_keys())
 		if info.get("mode") == "env":
 			return {"ok": False, "mode": "env", "message": ENV_MODE}
-		return self._claim(_new_pending_key())
+		if info.get("claimed"):
+			return {"ok": False, "message": ALREADY_CLAIMED}
+		key = self._begin_key_change()
+		return self._claim(key)
 
 	@frappe.whitelist(methods=["POST"])
 	def rotate_key(self):
 		frappe.only_for("System Manager")
-		self._refuse_if_pending()
 		current = self._require_current_key()
-		return self._rotate(current, _new_pending_key())
+		key = self._begin_key_change()
+		return self._rotate(current, key)
 
 	@frappe.whitelist(methods=["POST"])
 	def retry_pending(self):
-		"""Re-send the claim or rotation for a key the relay may or may not have taken."""
+		"""Finish a claim or rotation whose outcome is unknown, without ever dropping the pending key."""
 		frappe.only_for("System Manager")
 		pending = self.get_password("relay_pending_key", raise_exception=False)
 		if not pending:
 			frappe.throw(_("There is no pending key change to retry."))
 		try:
-			info = self._relay_info()
+			info = self._relay_info(pending)
 		except requests.exceptions.RequestException as exc:
 			return _failed(_unreachable(exc), self._known_keys())
+		if _authorized(info):
+			# The earlier claim or rotation landed; only its answer was lost.
+			return self._promote_pending()
 		if not info.get("claimed"):
 			return self._claim(pending)
-		# A claim or rotation whose 200 was lost: the relay already uses the
-		# pending key and answers this repeat with a 200 no-op.
-		return self._rotate(self._current_key(), pending)
+		current = self._current_key()
+		if current and self._accepts(current):
+			return self._rotate(current, pending)
+		return {"ok": False, "state": "keys_rejected", "message": KEYS_REJECTED}
 
 	@frappe.whitelist(methods=["POST"])
 	def update_callback(self):
@@ -75,7 +90,7 @@ class WhatsAppSettings(Document):
 			response = self._request("PUT", "/claim/callback", key=current, body=body)
 		except requests.exceptions.RequestException as exc:
 			return _failed(_unreachable(exc), self._known_keys())
-		if response.status_code == 200:
+		if _ok(response):
 			return {"ok": True, "message": _("Callback URL updated.")}
 		if _error_code(response) == "env_mode":
 			return _failed(ENV_MODE_CALLBACK, self._known_keys())
@@ -92,7 +107,7 @@ class WhatsAppSettings(Document):
 			return self._unreachable_state(_unreachable(exc), pending)
 		if response.status_code == 401:
 			return {"state": "key_rejected", "pending": pending}
-		if response.status_code != 200:
+		if not _ok(response):
 			return self._unreachable_state(_relay_error(response), pending)
 		info = _json(response)
 		return {**info, "state": _info_state(info), "pending": pending}
@@ -100,38 +115,64 @@ class WhatsAppSettings(Document):
 	def _unreachable_state(self, message, pending):
 		return {"state": "unreachable", "pending": pending, "message": _scrub(message, self._known_keys())}
 
+	def _begin_key_change(self):
+		"""Commit a new pending key, unless another change already holds one.
+
+		The lock spans check, write and commit, so two admins can't both start
+		a change and overwrite each other's pending key."""
+		with _key_change_lock():
+			if _pending_key_committed():
+				frappe.throw(_(KEY_PENDING))
+			key = secrets.token_urlsafe(32)
+			write_password("relay_pending_key", key)
+			frappe.db.commit()
+		return key
+
 	def _claim(self, key):
 		body = {"api_key": key, "callback_url": self._callback_url(), "site_name": frappe.local.site}
 		token = self.get_password("relay_bootstrap_token", raise_exception=False)
 		if token:
 			body["bootstrap_token"] = token
-		return self._change_key(key, "POST", "/claim", None, body, _("Relay connected."))
+		return self._send_key_change(key, "POST", "/claim", None, body, _("Relay connected."))
 
 	def _rotate(self, current, key):
-		return self._change_key(key, "POST", "/claim/rotate", current, {"api_key": key}, _("Key rotated."))
+		body = {"api_key": key}
+		return self._send_key_change(key, "POST", "/claim/rotate", current, body, _("Key rotated."))
 
-	def _change_key(self, key, method, path, auth_key, body, success):
-		"""Never lose a key: it is committed as pending before the relay sees it,
-		and becomes the current key only once the relay answers 200."""
-		write_password("relay_pending_key", key)
-		frappe.db.commit()
-		secrets_shown = self._known_keys() + [key]
+	def _send_key_change(self, key, method, path, auth_key, body, success):
+		"""Send an already committed pending key; it becomes current only on a 2xx,
+		or once the relay is seen to accept it."""
+		secrets_shown = [*self._known_keys(), key]
 		try:
 			response = self._request(method, path, key=auth_key, body=body)
 		except requests.exceptions.RequestException as exc:
 			return _failed(_unreachable(exc) + " " + _("Use Retry."), secrets_shown)
-		if response.status_code == 200:
-			write_password("relay_api_key", key)
-			write_password("relay_pending_key", None)
+		if _ok(response):
+			self._promote_pending(key)
 			return {"ok": True, "message": success}
 		if response.status_code >= 500:
 			# Outcome unknown (or the relay lost its claim): keep the key for Retry.
 			return _failed(_relay_error(response) + " " + _("Use Retry."), secrets_shown)
+		if self._accepts(key):
+			# Refused now, but an earlier attempt already landed.
+			return self._promote_pending(key)
 		write_password("relay_pending_key", None)
 		return _failed(REFUSALS.get(_error_code(response)) or _relay_error(response), secrets_shown)
 
-	def _relay_info(self):
-		response = self._request("GET", "/info")
+	def _promote_pending(self, key=None):
+		write_password("relay_api_key", key or self.get_password("relay_pending_key"))
+		write_password("relay_pending_key", None)
+		return {"ok": True, "message": _("The relay uses the new key; it is saved.")}
+
+	def _accepts(self, key):
+		"""Whether the relay authorizes this key: /info shows the keyed detail only then."""
+		try:
+			return _authorized(self._relay_info(key))
+		except requests.exceptions.RequestException:
+			return False
+
+	def _relay_info(self, key=None):
+		response = self._request("GET", "/info", key=key)
 		response.raise_for_status()
 		return _json(response)
 
@@ -174,15 +215,46 @@ def write_password(fieldname, value):
 		frappe.db.set_single_value(DOCTYPE, fieldname, None)
 
 
-def _new_pending_key():
-	return secrets.token_urlsafe(32)
+def key_lock_name():
+	# MariaDB named locks are server-wide: scope this one to the site's database.
+	return f"{frappe.conf.db_name}:whatsapp_relay_key"
+
+
+@contextmanager
+def _key_change_lock():
+	acquired = frappe.db.sql("SELECT GET_LOCK(%s, %s)", (key_lock_name(), KEY_LOCK_TIMEOUT))[0][0]
+	if acquired != 1:
+		frappe.throw(_(KEY_CHANGE_BUSY))
+	try:
+		yield
+	finally:
+		frappe.db.sql("SELECT RELEASE_LOCK(%s)", (key_lock_name(),))
+
+
+def _pending_key_committed():
+	# A locking read sees the latest committed row, not this transaction's
+	# snapshot, so a pending key another request just committed is not missed.
+	return bool(
+		frappe.db.sql(
+			"SELECT 1 FROM `__Auth` WHERE doctype=%s AND name=%s AND fieldname=%s FOR UPDATE",
+			(DOCTYPE, DOCTYPE, "relay_pending_key"),
+		)
+	)
+
+
+def _ok(response):
+	return 200 <= response.status_code < 300
+
+
+def _authorized(info):
+	return "sessions" in info
 
 
 def _info_state(info):
 	if not info.get("claimed"):
 		return "unclaimed"
 	# /info answers 200 to a wrong key too, just without the keyed detail.
-	return "ok" if "sessions" in info else "key_rejected"
+	return "ok" if _authorized(info) else "key_rejected"
 
 
 def _failed(message, keys):
