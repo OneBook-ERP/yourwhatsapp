@@ -188,4 +188,64 @@ class TestTemplateParameters(IntegrationTestCase):
 		).insert(ignore_permissions=True)
 		value = resolve("TP Date", "CRM Deal", deal.name)[0]
 		self.assertEqual(value, formatdate("2026-11-05"))
-		self.assertNotEqual(value, "2026-11-05")
+
+	def test_numbers_formatted(self):
+		self._template(
+			"TP Numbers",
+			"{{1}} {{2}}",
+			[(1, "deal_value", None), (2, "probability", None)],
+			for_doctype="CRM Deal",
+		)
+		deal = frappe.get_doc(
+			{
+				"doctype": "CRM Deal",
+				"lead": self._lead().name,
+				"deal_value": 1500,
+				"probability": 40,
+			}
+		).insert(ignore_permissions=True)
+		value, percent = resolve("TP Numbers", "CRM Deal", deal.name)
+		self.assertRegex(value, r"1[,.\s\u00a0']?500")
+		self.assertIn("40", percent)
+
+	def test_render_does_not_reinterpret_values(self):
+		self.assertEqual(render("{{1}} {{2}}", ["{{2}}", "x"]), "{{2}} x")
+
+	def test_template_validate_rejects_unsafe_fields(self):
+		unsafe = {
+			"password": ("Email Account", "password"),
+			"table": ("CRM Deal", "products"),
+			"attach": ("Data Import", "import_file"),
+			"attach image": ("CRM Deal", "organization_logo"),
+			"user secret via link": ("CRM Deal", "deal_owner.api_key"),
+			"user email via link": ("CRM Deal", "deal_owner.email"),
+		}
+		for case, (doctype, field) in unsafe.items():
+			with self.subTest(case):
+				with self.assertRaises(frappe.ValidationError) as ctx:
+					self._template(f"TP Unsafe {case}", "Hi {{1}}", [(1, field, None)], for_doctype=doctype)
+				self.assertIn("can't be used in templates", str(ctx.exception))
+		self._template("TP User Name", "Hi {{1}}", [(1, "deal_owner.full_name", None)], for_doctype="CRM Deal")
+
+	def test_resolve_refuses_unsafe_fields_without_for_doctype(self):
+		deal = frappe.get_doc(
+			{"doctype": "CRM Deal", "lead": self._lead().name, "deal_owner": "Administrator"}
+		).insert(ignore_permissions=True)
+		for field in ("deal_owner.api_key", "products", "organization_logo"):
+			name = f"TP Refuse {field}"
+			self._template(name, "Hi {{1}}", [(1, field, "fallback")])
+			with self.subTest(field):
+				with self.assertRaises(frappe.ValidationError) as ctx:
+					resolve(name, "CRM Deal", deal.name)
+				self.assertIn(f"field {field.split('.')[-1]} can't be used in templates", str(ctx.exception))
+
+		self._template("TP Owner", "Hi {{1}}", [(1, "deal_owner.full_name", None)])
+		full_name = frappe.db.get_value("User", "Administrator", "full_name")
+		self.assertEqual(resolve("TP Owner", "CRM Deal", deal.name), [full_name])
+
+	def test_unknown_field_without_for_doctype_reports_missing_field(self):
+		self._template("TP Unknown", "Hi {{1}}", [(1, "no_such_field", None)])
+		lead = self._lead()
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			resolve("TP Unknown", "CRM Lead", lead.name)
+		self.assertIn("CRM Lead has no field no_such_field", str(ctx.exception))

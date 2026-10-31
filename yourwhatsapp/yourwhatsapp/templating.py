@@ -5,10 +5,24 @@ import re
 
 import frappe
 from frappe import _
-from frappe.model import default_fields
+from frappe.model import default_fields, no_value_fields, table_fields
 from frappe.utils import cstr, format_datetime, formatdate
 
 PLACEHOLDER = re.compile(r"\{\{(\d+)\}\}")
+# Never readable into a customer message: secrets, file paths, raw structures.
+BLOCKED_FIELDTYPES = {
+	*no_value_fields,
+	*table_fields,
+	"Password",
+	"Attach",
+	"Attach Image",
+	"Code",
+	"Signature",
+	"Geolocation",
+	"JSON",
+}
+USER_FIELDS = {"full_name", "first_name", "last_name"}
+NUMERIC_FIELDTYPES = {"Int", "Float", "Currency", "Percent"}
 
 
 class UnresolvedPlaceholders(frappe.ValidationError):
@@ -49,10 +63,15 @@ def resolve(template_name, reference_doctype, reference_name) -> list[str]:
 		if not row:
 			problems.append(_("{0}, which has no parameter row (add parameter rows)").format(_tags([n])))
 			continue
+		error = reference and field_error(reference.doctype, row.field)
+		if error:
+			problems.append(_("{0} ({1}) but {2}").format(_tags([n]), row.field, error))
+			continue
 		value = _read(reference, row.field) if reference else None
-		value = value if _has_value(value) else row.default_value
 		if _has_value(value):
-			values[n - 1] = _to_text(value)
+			values[n - 1] = value
+		elif _has_value(row.default_value):
+			values[n - 1] = row.default_value
 		elif not reference:
 			problems.append(_("{0} ({1}) but the message has no reference document").format(_tags([n]), row.field))
 		else:
@@ -71,18 +90,15 @@ def resolve(template_name, reference_doctype, reference_name) -> list[str]:
 def field_error(doctype, field) -> str | None:
 	"""Why `field` (fieldname or link_field.target_field) can't be read on `doctype`, or None."""
 	head, _sep, target = field.partition(".")
-	if not _field_exists(doctype, head):
-		return _("{0} has no field {1}").format(doctype, head)
-	if not target:
-		return None
+	error = _usable_field_error(doctype, head)
+	if error or not target:
+		return error
 	linked_doctype = _link_target(doctype, head)
 	if not linked_doctype:
 		return _("{0}.{1} is not a Link field").format(doctype, head)
 	if "." in target:
 		return _("{0} follows more than one link").format(field)
-	if not _field_exists(linked_doctype, target):
-		return _("{0} has no field {1}").format(linked_doctype, target)
-	return None
+	return _usable_field_error(linked_doctype, target)
 
 
 def _reference_doc(doctype, name):
@@ -92,17 +108,24 @@ def _reference_doc(doctype, name):
 
 
 def _read(doc, field):
-	if field_error(doc.doctype, field):
-		return None
+	"""The field's value as text, or None; `field` has passed field_error."""
 	head, _sep, target = field.partition(".")
 	value = doc.get(head)
-	if not target or not value:
-		return value
-	return frappe.db.get_value(_link_target(doc.doctype, head), value, target)
+	if not target or not _has_value(value):
+		return _to_text(value, frappe.get_meta(doc.doctype).get_field(head), doc)
+	linked = frappe.get_doc(_link_target(doc.doctype, head), value)
+	return _to_text(linked.get(target), linked.meta.get_field(target), linked)
 
 
-def _field_exists(doctype, fieldname) -> bool:
-	return fieldname in default_fields or bool(frappe.get_meta(doctype).get_field(fieldname))
+def _usable_field_error(doctype, fieldname) -> str | None:
+	if fieldname in default_fields:
+		return None
+	df = frappe.get_meta(doctype).get_field(fieldname)
+	if not df:
+		return _("{0} has no field {1}").format(doctype, fieldname)
+	if df.fieldtype in BLOCKED_FIELDTYPES or (doctype == "User" and fieldname not in USER_FIELDS):
+		return _("field {0} can't be used in templates").format(fieldname)
+	return None
 
 
 def _link_target(doctype, fieldname):
@@ -114,7 +137,11 @@ def _has_value(value) -> bool:
 	return value is not None and cstr(value).strip() != ""
 
 
-def _to_text(value) -> str:
+def _to_text(value, df=None, doc=None) -> str | None:
+	if not _has_value(value):
+		return None
+	if df and df.fieldtype in NUMERIC_FIELDTYPES:
+		return frappe.format_value(value, df, doc)
 	if isinstance(value, datetime.datetime):
 		return format_datetime(value)
 	if isinstance(value, datetime.date):
