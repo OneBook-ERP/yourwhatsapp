@@ -17,3 +17,22 @@ def recover_rate_limited_accounts():
 		frappe.db.set_value(
 			"WhatsApp Account", account, {"status": "Active", "rate_limited_until": None}
 		)
+
+
+def retry_relay_unavailable_messages():
+	"""Re-dispatch messages relay_client parked while the relay was unavailable, once due."""
+	from yourwhatsapp.yourwhatsapp.relay_client import SEND_METHOD
+
+	# "between" rather than "<=": Frappe coalesces NULL to a zero date for "<=".
+	for name in frappe.get_all(
+		"WhatsApp Message",
+		filters={
+			"type": "Outgoing",
+			"status": "Queued",
+			"next_retry_at": ["between", ["2000-01-01", now_datetime()]],
+		},
+		pluck="name",
+	):
+		# Cleared first so the next tick can't dispatch it twice.
+		frappe.db.set_value("WhatsApp Message", name, "next_retry_at", None, update_modified=False)
+		frappe.enqueue(SEND_METHOD, queue="long", message_name=name, enqueue_after_commit=True)

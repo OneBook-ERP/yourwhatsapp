@@ -161,6 +161,24 @@
             "read_only": 1
         },
         {
+            "fieldname": "relay_retry_count",
+            "fieldtype": "Int",
+            "label": "Relay Retry Count",
+            "description": "Dispatches parked because the relay was unavailable.",
+            "default": "0",
+            "hidden": 1,
+            "read_only": 1,
+            "no_copy": 1
+        },
+        {
+            "fieldname": "next_retry_at",
+            "fieldtype": "Datetime",
+            "label": "Next Retry At",
+            "hidden": 1,
+            "read_only": 1,
+            "no_copy": 1
+        },
+        {
             "fieldname": "section_break_reference",
             "fieldtype": "Section Break"
         },

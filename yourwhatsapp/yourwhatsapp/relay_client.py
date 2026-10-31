@@ -4,11 +4,16 @@ import time
 
 import frappe
 import requests
+from frappe.utils import add_to_date, cint, now_datetime
 
 from yourwhatsapp.yourwhatsapp.routing import mark_rate_limited, pick_account, to_system_datetime
 
 DISPATCH_BUDGET_SECONDS = 240
 TIMEOUT = 30  # the relay only queues the send, so a slow answer means trouble
+SEND_METHOD = "yourwhatsapp.yourwhatsapp.relay_client.send_message"
+# When no account could be reached at all (relay down or restarting), the
+# message is parked Queued and re-dispatched after these delays; then Failed.
+RELAY_RETRY_MINUTES = (1, 2, 5, 10, 20)
 
 
 def relay_settings():
@@ -83,7 +88,7 @@ def handle_async_failure(message_name: str, error_code: str):
 	_remember_attempt(doc, doc.whatsapp_account)
 	# message_status only applies a Failed callback while the message is Queued.
 	doc.db_set("status", "Queued")
-	if _switch_account(doc, f"Relay error: {error_code}"):
+	if _switch_account(doc, f"Relay error: {error_code}", append=True):
 		_dispatch(doc)
 
 
@@ -111,14 +116,39 @@ def _remember_attempt(doc, account: str):
 		doc.db_set("attempted_accounts", json.dumps(attempted))
 
 
-def _switch_account(doc, reason: str) -> bool:
-	"""Move the message to an account not yet tried; Failed with `reason` when none is left."""
+def _switch_account(doc, reason: str, relay_unavailable: bool = False, append: bool = False) -> bool:
+	"""Move the message to an account not yet tried. When none is left it is
+	parked for a later retry if the relay itself was unavailable, else Failed
+	with `reason` (appended to the relay's own reason when `append`)."""
 	next_account = pick_account(exclude=_attempted_accounts(doc))
-	if not next_account:
-		_fail(doc, f"{reason}; no other WhatsApp Account available")
+	if next_account:
+		doc.db_set("whatsapp_account", next_account)
+		return True
+	if relay_unavailable:
+		_retry_later(doc, reason)
 		return False
-	doc.db_set("whatsapp_account", next_account)
-	return True
+	reason = f"{reason}; no other WhatsApp Account available"
+	_fail(doc, f"{doc.error_reason}; {reason}" if append and doc.error_reason else reason)
+	return False
+
+
+def _retry_later(doc, reason: str):
+	"""No account could be reached: park the message Queued and let
+	tasks.retry_relay_unavailable_messages re-dispatch it (Frappe's enqueue has
+	no delay), with every account eligible again."""
+	retries = cint(doc.relay_retry_count)
+	if retries >= len(RELAY_RETRY_MINUTES):
+		doc.db_set("next_retry_at", None)
+		_fail(doc, f"relay unavailable after {retries} retries; last error: {reason}")
+		return
+	doc.db_set(
+		{
+			"status": "Queued",
+			"attempted_accounts": None,
+			"relay_retry_count": retries + 1,
+			"next_retry_at": add_to_date(now_datetime(), minutes=RELAY_RETRY_MINUTES[retries]),
+		}
+	)
 
 
 def _to_is_lid(doc) -> bool:
@@ -180,9 +210,16 @@ def _dispatch(doc):
 		return
 
 	previous_account = None
+	# Stays True while every account only failed to answer (connection error,
+	# timeout, 409 session_unavailable): the relay as a whole is unavailable.
+	relay_unavailable = True
 	while True:
 		if previous_account and time.monotonic() - started > DISPATCH_BUDGET_SECONDS:
-			_fail(doc, "relay unreachable; dispatch time budget exhausted")
+			reason = "relay unreachable; dispatch time budget exhausted"
+			if relay_unavailable:
+				_retry_later(doc, reason)
+			else:
+				_fail(doc, reason)
 			return
 		account = frappe.get_doc("WhatsApp Account", doc.whatsapp_account)
 		_remember_attempt(doc, account.name)
@@ -191,7 +228,7 @@ def _dispatch(doc):
 			response = _post(doc, account, base_url, api_key)
 		except requests.exceptions.RequestException as e:
 			previous_account = account.name
-			if not _switch_account(doc, f"Relay unreachable: {e}"):
+			if not _switch_account(doc, f"Relay unreachable: {e}", relay_unavailable):
 				return
 			continue
 
@@ -209,6 +246,8 @@ def _dispatch(doc):
 			return
 		if status == 429:
 			mark_rate_limited(account.name, _ban_expiry(response))
+		if status != 409:
+			relay_unavailable = False
 		previous_account = account.name
-		if not _switch_account(doc, f"Relay error: {code or status}"):
+		if not _switch_account(doc, f"Relay error: {code or status}", relay_unavailable):
 			return

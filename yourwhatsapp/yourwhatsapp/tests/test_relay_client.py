@@ -148,12 +148,21 @@ class TestRelayClient(IntegrationTestCase):
 	def test_dispatch_time_budget_exhausted_fails(self):
 		msg = self._make_message()
 		clock = iter([0, 241])
+		ban = relay_response(429, {"error": "temp_banned"})
 		with patch.object(relay_client, "time", MagicMock(monotonic=lambda: next(clock))):
-			post = self._send(msg, relay_response(409, {"error": "session_unavailable"}))
+			post = self._send(msg, ban)
 		self.assertEqual(post.call_count, 1)
 		row = self._row(msg.name)
 		self.assertEqual(row.status, "Failed")
 		self.assertEqual(row.error_reason, "relay unreachable; dispatch time budget exhausted")
+
+	def test_dispatch_time_budget_exhausted_relay_down_requeues(self):
+		msg = self._make_message()
+		clock = iter([0, 241])
+		with patch.object(relay_client, "time", MagicMock(monotonic=lambda: next(clock))):
+			self._send(msg, requests.exceptions.ConnectionError())
+		self.assertEqual(self._retry_row(msg.name).relay_retry_count, 1)
+		self.assertEqual(self._row(msg.name).status, "Queued")
 
 	def test_connection_error_fails_over_without_retry(self):
 		msg = self._make_message()
@@ -162,11 +171,83 @@ class TestRelayClient(IntegrationTestCase):
 		self.assertEqual(self._row(msg.name).whatsapp_account, self.account_b.name)
 
 	def test_all_accounts_exhausted_failed(self):
+		# One account answered for real (429), so the relay itself is up.
 		msg = self._make_message()
-		self._send(msg, relay_response(409, {"error": "session_unavailable"}), relay_response(409))
+		self._send(msg, relay_response(429, {"error": "temp_banned"}), relay_response(409))
 		row = self._row(msg.name)
 		self.assertEqual(row.status, "Failed")
 		self.assertIn("no other WhatsApp Account", row.error_reason)
+
+	def _retry_row(self, name):
+		return frappe.db.get_value(
+			"WhatsApp Message", name, ["relay_retry_count", "next_retry_at", "attempted_accounts"], as_dict=True
+		)
+
+	def _relay_down(self, msg):
+		"""Every account fails as if the relay were down: connection refused, then restarting (409)."""
+		self._send(msg, requests.exceptions.ConnectionError(), relay_response(409, {"error": "session_unavailable"}))
+
+	def test_relay_down_requeues_with_backoff(self):
+		msg = self._make_message()
+		for attempt, minutes in enumerate((1, 2, 5, 10, 20), start=1):
+			before = now_datetime()
+			self._relay_down(msg)
+			row, retry = self._row(msg.name), self._retry_row(msg.name)
+			self.assertEqual(row.status, "Queued")
+			self.assertEqual(retry.relay_retry_count, attempt)
+			self.assertFalse(json.loads(retry.attempted_accounts or "[]"))
+			expected = add_to_date(before, minutes=minutes)
+			self.assertLessEqual(abs((retry.next_retry_at - expected).total_seconds()), 5)
+
+			# Not due yet: the retry job leaves it alone.
+			frappe.enqueue.reset_mock()
+			tasks.retry_relay_unavailable_messages()
+			frappe.enqueue.assert_not_called()
+
+			# Once due, the job re-dispatches it exactly once.
+			frappe.db.set_value("WhatsApp Message", msg.name, "next_retry_at", add_to_date(now_datetime(), seconds=-1))
+			tasks.retry_relay_unavailable_messages()
+			tasks.retry_relay_unavailable_messages()
+			sends = [c for c in frappe.enqueue.call_args_list if c.args[0] == relay_client.SEND_METHOD]
+			self.assertEqual([c.kwargs["message_name"] for c in sends], [msg.name])
+			self.assertIsNone(self._retry_row(msg.name).next_retry_at)
+
+	def test_relay_down_gives_up_after_retries(self):
+		msg = self._make_message()
+		msg.db_set("relay_retry_count", 5)
+		self._relay_down(msg)
+		row = self._row(msg.name)
+		self.assertEqual(row.status, "Failed")
+		self.assertIn("relay unavailable", row.error_reason)
+		self.assertIsNone(self._retry_row(msg.name).next_retry_at)
+
+	def test_async_send_failed_during_restart_requeues(self):
+		msg = self._make_message()
+		self._send(msg, relay_response(202))
+		api.message_status(
+			status="Failed",
+			local_message_id=msg.name,
+			error_code="send_failed",
+			error_reason="relay restarted before the message was sent",
+		)
+		with patch("requests.post", side_effect=requests.exceptions.ConnectionError()):
+			relay_client.handle_async_failure(msg.name, "send_failed")
+		row, retry = self._row(msg.name), self._retry_row(msg.name)
+		self.assertEqual(row.status, "Queued")
+		self.assertEqual(retry.relay_retry_count, 1)
+		self.assertFalse(json.loads(retry.attempted_accounts or "[]"))
+
+	def test_exhausted_failover_appends_reason(self):
+		msg = self._make_message()
+		self._send(msg, relay_response(202))
+		frappe.db.set_value("WhatsApp Account", self.account_b.name, "status", "Disconnected")
+		api.message_status(status="Failed", local_message_id=msg.name, error_code="send_failed", error_reason="boom")
+		relay_client.handle_async_failure(msg.name, "send_failed")
+		row = self._row(msg.name)
+		self.assertEqual(row.status, "Failed")
+		self.assertEqual(
+			row.error_reason, "boom; Relay error: send_failed; no other WhatsApp Account available"
+		)
 
 	def test_async_failure_fails_over_excluding_attempted(self):
 		msg = self._make_message()
