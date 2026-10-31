@@ -3,6 +3,7 @@ package session
 import (
 	"context"
 	"encoding/base64"
+	"errors"
 	"log/slog"
 	"sync"
 	"time"
@@ -45,6 +46,8 @@ const (
 	sendTimeout      = 2 * time.Minute
 	callbackTimeout  = 10 * time.Second
 	unknownBanExpiry = time.Hour
+
+	unconfirmedReason = "send not confirmed by WhatsApp; may have been delivered"
 )
 
 type statusPayload struct {
@@ -484,12 +487,30 @@ func (s *Session) deliver(job *sendJob) {
 	}
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
-	resp, err := s.client.SendMessage(ctx, job.to, msg)
-	if err != nil {
+	// The id is fixed up front so an unconfirmed send can still be matched
+	// to its receipts.
+	id := s.client.GenerateMessageID()
+	resp, err := s.client.SendMessage(ctx, job.to, msg, whatsmeow.SendRequestExtra{ID: id})
+	switch {
+	case err == nil:
+		s.finishSent(job, resp.ID)
+	case sendUnconfirmed(err):
+		s.finishUnconfirmed(job, id, err)
+	default:
 		s.finishFailed(job, store.ErrCodeSendFailed, err.Error())
-		return
 	}
-	s.finishSent(job, resp.ID)
+}
+
+// sendUnconfirmed reports whether a SendMessage error can come after the
+// message node was written (whatsmeow send.go at the pinned version: waiting
+// for the server ack timed out or was cancelled, or the socket dropped and
+// the retried frame got no answer). Failing over would risk a duplicate.
+func sendUnconfirmed(err error) bool {
+	var disconnected *whatsmeow.DisconnectedError
+	return errors.Is(err, whatsmeow.ErrMessageTimedOut) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled) ||
+		errors.As(err, &disconnected)
 }
 
 func typingDelay(text string) time.Duration {
@@ -524,6 +545,26 @@ func (s *Session) finishSent(job *sendJob, messageID string) {
 		return
 	}
 	s.callback(outbox.MethodStatus, statusPayload{LocalMessageID: job.localID, MessageID: messageID, Status: "Sent"})
+}
+
+// finishUnconfirmed reports a send of unknown outcome as Failed with
+// send_unconfirmed and its message id; Frappe does not fail it over, and a
+// later receipt for the id lifts the status.
+func (s *Session) finishUnconfirmed(job *sendJob, messageID string, sendErr error) {
+	ctx, cancel := context.WithTimeout(context.Background(), callbackTimeout)
+	defer cancel()
+	ok, err := s.m.st.MarkUnconfirmed(ctx, job.localID, s.id, messageID)
+	if err != nil {
+		s.log.Error("mark send unconfirmed", "local_message_id", job.localID, "error", err)
+	} else if !ok {
+		s.log.Warn("send result ignored: reservation no longer queued on this session", "local_message_id", job.localID)
+		return
+	}
+	s.log.Warn("send unconfirmed", "local_message_id", job.localID, "message_id", messageID, "error", sendErr)
+	s.callback(outbox.MethodStatus, statusPayload{
+		LocalMessageID: job.localID, MessageID: messageID, Status: "Failed",
+		ErrorCode: store.ErrCodeSendUnconfirmed, ErrorReason: unconfirmedReason,
+	})
 }
 
 func (s *Session) finishFailed(job *sendJob, code, reason string) {

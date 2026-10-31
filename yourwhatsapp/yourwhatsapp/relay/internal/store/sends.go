@@ -13,6 +13,9 @@ const (
 
 	// ErrCodeSendFailed is the error code recorded for sends that did not complete.
 	ErrCodeSendFailed = "send_failed"
+	// ErrCodeSendUnconfirmed is recorded when the send errored after the
+	// message went out: WhatsApp may have delivered it.
+	ErrCodeSendUnconfirmed = "send_unconfirmed"
 )
 
 type SendRecord struct {
@@ -81,6 +84,17 @@ func (s *Store) MarkFailed(ctx context.Context, localID, sessionID, code string)
 	res, err := s.DB.ExecContext(ctx, `UPDATE sends SET state = 'failed', error_code = ?,
 		updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
 		WHERE local_message_id = ? AND session_id = ? AND state = 'queued'`, code, localID, sessionID)
+	return affected(res, err)
+}
+
+// MarkUnconfirmed records a send whose outcome is unknown as failed with
+// send_unconfirmed, keeping its message id so later receipts can still match.
+// Same guard as MarkSent.
+func (s *Store) MarkUnconfirmed(ctx context.Context, localID, sessionID, messageID string) (bool, error) {
+	res, err := s.DB.ExecContext(ctx, `UPDATE sends SET state = 'failed', message_id = ?, error_code = ?,
+		updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		WHERE local_message_id = ? AND session_id = ? AND state = 'queued'`,
+		messageID, ErrCodeSendUnconfirmed, localID, sessionID)
 	return affected(res, err)
 }
 

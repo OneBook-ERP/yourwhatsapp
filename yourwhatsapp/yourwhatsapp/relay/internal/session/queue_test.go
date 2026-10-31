@@ -1,10 +1,13 @@
 package session
 
 import (
+	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/types"
 
 	"yourwhatsapp/relay/internal/outbox"
@@ -81,6 +84,47 @@ func TestQueueErrorMarksFailedAndCallback(t *testing.T) {
 	}
 	if rec := h.sendRow("m1"); rec.State != store.SendFailed || rec.ErrorCode != store.ErrCodeSendFailed {
 		t.Errorf("row = %+v", rec)
+	}
+}
+
+// An error after the message node went out leaves delivery unknown: it is
+// reported as send_unconfirmed with the pre-generated id (no failover, so no
+// duplicate), while errors before the send stay send_failed.
+func TestQueueAmbiguousErrorIsUnconfirmed(t *testing.T) {
+	cases := map[string]error{
+		"response timeout":   whatsmeow.ErrMessageTimedOut,
+		"deadline":           fmt.Errorf("wrapped: %w", context.DeadlineExceeded),
+		"canceled":           context.Canceled,
+		"retry disconnected": &whatsmeow.DisconnectedError{Action: "message send"},
+	}
+	for name, sendErr := range cases {
+		t.Run(name, func(t *testing.T) {
+			h := newHarness(t)
+			fc := h.connected("A", testJID)
+			fc.registered["+919000000001"] = mustJID(peerJID)
+			fc.sendErr = sendErr
+
+			if serr := h.send(SendRequest{SessionID: "A", To: "+919000000001", Message: "hello", LocalID: "m1"}); serr != nil {
+				t.Fatal(serr)
+			}
+			h.waitFor("status callback", func() bool { return len(h.callbacks(outbox.MethodStatus)) == 1 })
+
+			cb := h.callbacks(outbox.MethodStatus)[0]
+			want := map[string]any{
+				"local_message_id": "m1", "message_id": "WAID-1", "status": "Failed",
+				"error_code":   "send_unconfirmed",
+				"error_reason": "send not confirmed by WhatsApp; may have been delivered",
+			}
+			if fmt.Sprint(cb) != fmt.Sprint(want) {
+				t.Errorf("callback = %v, want %v", cb, want)
+			}
+			if rec := h.sendRow("m1"); rec.State != store.SendFailed || rec.ErrorCode != store.ErrCodeSendUnconfirmed || rec.MessageID != "WAID-1" {
+				t.Errorf("row = %+v", rec)
+			}
+			if ids := fc.sentIDs(); len(ids) != 1 || ids[0] != "WAID-1" {
+				t.Errorf("SendMessage ids = %v, want the pre-generated WAID-1", ids)
+			}
+		})
 	}
 }
 

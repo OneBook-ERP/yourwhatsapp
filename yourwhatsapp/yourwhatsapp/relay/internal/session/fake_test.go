@@ -41,6 +41,8 @@ type fakeClient struct {
 	registered  map[string]types.JID
 	isOnCalls   []string
 	sendErr     error
+	generated   int
+	sendIDs     []types.MessageID // the ID passed to every SendMessage call
 	sent        []fakeSent
 	presences   []types.ChatPresence
 	uploads     []whatsmeow.MediaType
@@ -130,14 +132,28 @@ func (f *fakeClient) Upload(_ context.Context, _ []byte, mt whatsmeow.MediaType)
 	return whatsmeow.UploadResponse{URL: "https://mmg.example/x", DirectPath: "/x"}, nil
 }
 
-func (f *fakeClient) SendMessage(_ context.Context, to types.JID, msg *waE2E.Message, _ ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error) {
+func (f *fakeClient) GenerateMessageID() types.MessageID {
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.generated++
+	return fmt.Sprintf("WAID-%d", f.generated)
+}
+
+func (f *fakeClient) SendMessage(_ context.Context, to types.JID, msg *waE2E.Message, extra ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error) {
+	f.mu.Lock()
+	var id types.MessageID
+	if len(extra) > 0 {
+		id = extra[0].ID
+	}
+	f.sendIDs = append(f.sendIDs, id)
 	if f.sendErr != nil {
 		f.mu.Unlock()
 		return whatsmeow.SendResponse{}, f.sendErr
 	}
 	f.sent = append(f.sent, fakeSent{to, msg})
-	id := fmt.Sprintf("WAID-%d", len(f.sent))
+	if id == "" {
+		id = fmt.Sprintf("WAID-%d", len(f.sent))
+	}
 	hook := f.afterSend
 	f.mu.Unlock()
 	if hook != nil {
@@ -199,6 +215,12 @@ func (f *fakeClient) sentCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.sent)
+}
+
+func (f *fakeClient) sentIDs() []types.MessageID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]types.MessageID(nil), f.sendIDs...)
 }
 
 func (f *fakeClient) presenceCount() int {
