@@ -85,6 +85,11 @@ type Session struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 
+	// sendMu is held from SendMessage until the Sent callback is enqueued,
+	// and by onReceipt, so a receipt can never reach the outbox before the
+	// Sent for its message.
+	sendMu sync.Mutex
+
 	mu       sync.Mutex
 	status   string
 	jid      types.JID
@@ -263,6 +268,10 @@ func (s *Session) handleEvent(evt any) {
 		s.onStreamReplaced()
 	case *events.TemporaryBan:
 		s.onTemporaryBan(e)
+	case *events.ConnectFailure:
+		s.onConnectionLost("connect failure", "reason", int(e.Reason))
+	case *events.ClientOutdated:
+		s.onConnectionLost("client outdated: whatsmeow needs upgrading")
 	case *events.Disconnected:
 		s.log.Info("socket disconnected; auto-reconnect will retry")
 	case *events.Message:
@@ -322,6 +331,16 @@ func (s *Session) onStreamReplaced() {
 	s.client.Disconnect()
 	s.setStatus(StatusDisconnected)
 	s.pushStatus(frappeDisconnected)
+}
+
+// onConnectionLost handles failures after which whatsmeow does not reconnect
+// on its own (LoggedOut and TemporaryBan have their own events). The session
+// becomes disconnected, so the next Start rebuilds it.
+func (s *Session) onConnectionLost(msg string, attrs ...any) {
+	s.log.Error(msg+"; not reconnecting", attrs...)
+	if prev := s.setStatus(StatusDisconnected); prev != StatusDisconnected {
+		s.pushStatus(frappeDisconnected)
+	}
 }
 
 func (s *Session) onTemporaryBan(e *events.TemporaryBan) {
@@ -396,6 +415,8 @@ func (s *Session) onReceipt(e *events.Receipt) {
 	if !ok {
 		return
 	}
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
 	for _, id := range e.MessageIDs {
 		s.callback(outbox.MethodStatus, statusPayload{MessageID: id, Status: status})
 	}
@@ -450,13 +471,20 @@ func (s *Session) deliver(job *sendJob) {
 
 	s.presence(ctx, job.to, types.ChatPresenceComposing)
 	s.queue.sleep(typingDelay(job.text))
+	if s.queue.isStopped() { // paused, logged out or shutting down mid-typing
+		s.finishFailed(job, CodeSessionUnavailable, "session stopped")
+		return
+	}
 	s.presence(ctx, job.to, types.ChatPresencePaused)
 
 	msg, err := s.buildMessage(ctx, job)
-	var resp whatsmeow.SendResponse
-	if err == nil {
-		resp, err = s.client.SendMessage(ctx, job.to, msg)
+	if err != nil {
+		s.finishFailed(job, store.ErrCodeSendFailed, err.Error())
+		return
 	}
+	s.sendMu.Lock()
+	defer s.sendMu.Unlock()
+	resp, err := s.client.SendMessage(ctx, job.to, msg)
 	if err != nil {
 		s.finishFailed(job, store.ErrCodeSendFailed, err.Error())
 		return

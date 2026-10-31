@@ -133,17 +133,8 @@ func (m *Manager) session(id string) *Session {
 // RestoreAll fails sends lost with the previous process, then connects every
 // paired, unpaused account.
 func (m *Manager) RestoreAll(ctx context.Context) error {
-	failed, err := m.st.FailQueued(ctx)
-	if err != nil {
-		return fmt.Errorf("fail queued sends: %w", err)
-	}
-	for _, r := range failed {
-		if err := m.enqueue(ctx, outbox.MethodStatus, statusPayload{
-			LocalMessageID: r.LocalID, Status: "Failed", ErrorCode: store.ErrCodeSendFailed,
-			ErrorReason: "relay restarted before the message was sent",
-		}); err != nil {
-			return fmt.Errorf("enqueue failed send %s: %w", r.LocalID, err)
-		}
+	if err := m.failLostSends(ctx); err != nil {
+		return err
 	}
 	accounts, err := m.st.ListRestorable(ctx)
 	if err != nil {
@@ -155,6 +146,28 @@ func (m *Manager) RestoreAll(ctx context.Context) error {
 		unlock()
 		if err != nil {
 			m.log.Error("restore session", "session_id", a.SessionID, "error", err)
+		}
+	}
+	return nil
+}
+
+// failLostSends reports every send still queued from the previous process as
+// Failed. Each row is marked failed only after its callback is in the outbox,
+// so an error leaves the remaining rows queued for the next boot.
+func (m *Manager) failLostSends(ctx context.Context) error {
+	queued, err := m.st.ListQueued(ctx)
+	if err != nil {
+		return fmt.Errorf("list queued sends: %w", err)
+	}
+	for _, r := range queued {
+		if err := m.enqueue(ctx, outbox.MethodStatus, statusPayload{
+			LocalMessageID: r.LocalID, Status: "Failed", ErrorCode: store.ErrCodeSendFailed,
+			ErrorReason: "relay restarted before the message was sent",
+		}); err != nil {
+			return fmt.Errorf("enqueue failed send %s: %w", r.LocalID, err)
+		}
+		if _, err := m.st.MarkFailed(ctx, r.LocalID, r.SessionID, store.ErrCodeSendFailed); err != nil {
+			return fmt.Errorf("mark send %s failed: %w", r.LocalID, err)
 		}
 	}
 	return nil
@@ -556,10 +569,7 @@ func (m *Manager) deleteDevice(ctx context.Context, jidStr string) error {
 
 // newSession builds a Session around a fresh client and registers it.
 func (m *Manager) newSession(id string, dev *wastore.Device, proxy string) (*Session, error) {
-	m.mu.Lock()
-	closed := m.closed
-	m.mu.Unlock()
-	if closed {
+	if m.isClosed() {
 		return nil, ErrShuttingDown
 	}
 	client := m.factory(dev)
@@ -581,10 +591,25 @@ func (m *Manager) newSession(id string, dev *wastore.Device, proxy string) (*Ses
 	}
 	client.AddEventHandler(s.handleEvent)
 	s.queue.start(s.deliver)
+	// Re-check under the same lock as registration: a Shutdown that ran
+	// while the client was being built would otherwise never stop it.
 	m.mu.Lock()
-	m.sessions[id] = s
+	closed := m.closed
+	if !closed {
+		m.sessions[id] = s
+	}
 	m.mu.Unlock()
+	if closed {
+		m.retire(s)
+		return nil, ErrShuttingDown
+	}
 	return s, nil
+}
+
+func (m *Manager) isClosed() bool {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.closed
 }
 
 // retire stops a session: its events are ignored from now on, waiting jobs

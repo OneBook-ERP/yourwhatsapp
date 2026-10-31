@@ -75,7 +75,7 @@ func TestReserveSentIsDuplicate(t *testing.T) {
 	}
 }
 
-func TestFailQueued(t *testing.T) {
+func TestListQueued(t *testing.T) {
 	s, _ := openTemp(t)
 	ctx := context.Background()
 	mustReserve(t, s, "q1", "A")
@@ -84,20 +84,15 @@ func TestFailQueued(t *testing.T) {
 	if _, err := s.MarkSent(ctx, "s1", "A", "WAID"); err != nil {
 		t.Fatal(err)
 	}
-	failed, err := s.FailQueued(ctx)
+	queued, err := s.ListQueued(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(failed) != 2 {
-		t.Fatalf("got %d failed, want 2", len(failed))
+	if len(queued) != 2 || queued[0].LocalID != "q1" || queued[1].LocalID != "q2" || queued[1].SessionID != "B" {
+		t.Fatalf("queued = %+v", queued)
 	}
-	for _, id := range []string{"q1", "q2"} {
-		if got := getSend(t, s, id); got.State != SendFailed || got.ErrorCode != "send_failed" {
-			t.Errorf("%s = %+v", id, got)
-		}
-	}
-	if got := getSend(t, s, "s1"); got.State != SendSent {
-		t.Errorf("sent row changed: %+v", got)
+	if got := getSend(t, s, "q1"); got.State != SendQueued {
+		t.Errorf("ListQueued changed a row: %+v", got)
 	}
 }
 

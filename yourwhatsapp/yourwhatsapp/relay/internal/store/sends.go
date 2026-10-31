@@ -92,12 +92,11 @@ func affected(res sql.Result, err error) (bool, error) {
 	return n > 0, err
 }
 
-// FailQueued marks every queued row failed/send_failed (boot recovery: queued
-// jobs live in memory and are lost on restart) and returns the affected rows.
-func (s *Store) FailQueued(ctx context.Context) ([]SendRecord, error) {
-	rows, err := s.DB.QueryContext(ctx, `UPDATE sends SET state = 'failed', error_code = ?,
-		updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE state = 'queued'
-		RETURNING `+sendColumns+` `, ErrCodeSendFailed)
+// ListQueued returns every queued row, oldest first (boot recovery: queued
+// jobs live in memory and are lost on restart).
+func (s *Store) ListQueued(ctx context.Context) ([]SendRecord, error) {
+	rows, err := s.DB.QueryContext(ctx, `SELECT `+sendColumns+` FROM sends WHERE state = 'queued'
+		ORDER BY created_at, local_message_id`)
 	if err != nil {
 		return nil, err
 	}

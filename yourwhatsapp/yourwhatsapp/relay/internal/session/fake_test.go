@@ -47,6 +47,7 @@ type fakeClient struct {
 	download    []byte
 	downloadErr error
 	pairPhone   string
+	afterSend   func(id string) // run on its own goroutine, like whatsmeow's handler queue
 }
 
 func newFakeClient(dev *wastore.Device) *fakeClient {
@@ -131,12 +132,24 @@ func (f *fakeClient) Upload(_ context.Context, _ []byte, mt whatsmeow.MediaType)
 
 func (f *fakeClient) SendMessage(_ context.Context, to types.JID, msg *waE2E.Message, _ ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error) {
 	f.mu.Lock()
-	defer f.mu.Unlock()
 	if f.sendErr != nil {
+		f.mu.Unlock()
 		return whatsmeow.SendResponse{}, f.sendErr
 	}
 	f.sent = append(f.sent, fakeSent{to, msg})
-	return whatsmeow.SendResponse{ID: fmt.Sprintf("WAID-%d", len(f.sent))}, nil
+	id := fmt.Sprintf("WAID-%d", len(f.sent))
+	hook := f.afterSend
+	f.mu.Unlock()
+	if hook != nil {
+		done := make(chan struct{})
+		go func() { hook(id); close(done) }()
+		// Give the receipt a head start so an unordered implementation loses.
+		select {
+		case <-done:
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	return whatsmeow.SendResponse{ID: id}, nil
 }
 
 func (f *fakeClient) SendChatPresence(_ context.Context, _ types.JID, state types.ChatPresence, _ types.ChatPresenceMedia) error {
@@ -200,14 +213,16 @@ type callback struct {
 }
 
 type harness struct {
-	t     *testing.T
-	m     *Manager
-	st    *store.Store
-	setup func(*fakeClient)
+	t          *testing.T
+	m          *Manager
+	st         *store.Store
+	setup      func(*fakeClient)
+	enqueueErr func(n int) error // n counts enqueue calls from 1
 
-	mu      sync.Mutex
-	calls   []callback
-	clients []*fakeClient
+	mu       sync.Mutex
+	enqueueN int
+	calls    []callback
+	clients  []*fakeClient
 }
 
 func newHarness(t *testing.T) *harness {
@@ -219,6 +234,15 @@ func newHarness(t *testing.T) *harness {
 	}
 	h := &harness{t: t, st: st}
 	enqueue := func(_ context.Context, method string, payload any) error {
+		h.mu.Lock()
+		hook, n := h.enqueueErr, h.enqueueN+1
+		h.enqueueN = n
+		h.mu.Unlock()
+		if hook != nil {
+			if err := hook(n); err != nil {
+				return err
+			}
+		}
 		b, err := json.Marshal(payload)
 		if err != nil {
 			return err
