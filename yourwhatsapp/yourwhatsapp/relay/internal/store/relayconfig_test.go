@@ -42,3 +42,38 @@ func TestRelayConfigInsertOnceAndSurvivesReopen(t *testing.T) {
 		t.Fatalf("got %+v, want %+v", got, want)
 	}
 }
+
+// seedDevice inserts a minimal linked-device row, as whatsmeow would after pairing.
+func seedDevice(ctx context.Context, s *Store) error {
+	_, err := s.DB.ExecContext(ctx, `INSERT INTO whatsmeow_device (jid, registration_id, noise_key, identity_key,
+		signed_pre_key, signed_pre_key_id, signed_pre_key_sig, adv_key, adv_details,
+		adv_account_sig, adv_account_sig_key, adv_device_sig)
+		VALUES ('1@s.whatsapp.net', 1, zeroblob(32), zeroblob(32), zeroblob(32), 1, zeroblob(64),
+		x'00', x'00', zeroblob(64), zeroblob(32), zeroblob(64))`)
+	return err
+}
+
+func TestHasAnyData(t *testing.T) {
+	ctx := context.Background()
+	for _, c := range []struct {
+		name string
+		seed func(s *Store) error
+	}{
+		{"account", func(s *Store) error { return s.UpsertAccount(ctx, "acc1") }},
+		{"outbox", func(s *Store) error { return s.EnqueueCallback(ctx, "update_qr", map[string]any{"a": 1}) }},
+		{"device", func(s *Store) error { return seedDevice(ctx, s) }},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			s, _ := openTemp(t)
+			if has, err := s.HasAnyData(ctx); err != nil || has {
+				t.Fatalf("fresh store HasAnyData = %v, %v", has, err)
+			}
+			if err := c.seed(s); err != nil {
+				t.Fatal(err)
+			}
+			if has, err := s.HasAnyData(ctx); err != nil || !has {
+				t.Fatalf("after %s HasAnyData = %v, %v", c.name, has, err)
+			}
+		})
+	}
+}

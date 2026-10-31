@@ -108,3 +108,19 @@ func TestClaimedSignal(t *testing.T) {
 		t.Fatal("signal not closed after claim")
 	}
 }
+
+// A claim that lands while the relay is shutting down must not restore sessions.
+func TestRestoreSessionsSkipsAfterShutdown(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	r := newFakeRestorer()
+	restoreSessions(ctx, r, discard)
+	select {
+	case <-r.restored:
+		t.Fatal("restored sessions after shutdown began")
+	default:
+	}
+	if r.failArms.Load() != 0 {
+		t.Fatal("armed lost-send failover after shutdown began")
+	}
+}

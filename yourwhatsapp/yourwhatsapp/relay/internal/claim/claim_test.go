@@ -232,3 +232,60 @@ func TestClaimConcurrentOnlyOneWins(t *testing.T) {
 		t.Fatalf("hook ran %d times, want 1", n)
 	}
 }
+
+func TestFreshUnclaimedStarts(t *testing.T) {
+	if cs := newState(t, openStore(t), config.Config{}); cs.Mode() != ModeUnclaimed {
+		t.Fatalf("mode = %q", cs.Mode())
+	}
+}
+
+// A data dir with linked numbers but no claim must not be handed to whoever
+// claims first.
+func TestPopulatedUnclaimedRefusesWithoutToken(t *testing.T) {
+	st := openStore(t)
+	if err := st.UpsertAccount(context.Background(), "acc1"); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New(st, config.Config{}, clock)
+	if !errors.Is(err, ErrPopulatedUnclaimed) {
+		t.Fatalf("err = %v, want ErrPopulatedUnclaimed", err)
+	}
+	if !strings.Contains(err.Error(), "RELAY_API_KEY") || !strings.Contains(err.Error(), "RELAY_BOOTSTRAP_TOKEN") {
+		t.Fatalf("error %q does not say how to fix it", err)
+	}
+}
+
+func TestPopulatedUnclaimedStartsWithToken(t *testing.T) {
+	st := openStore(t)
+	if err := st.EnqueueCallback(context.Background(), "update_qr", map[string]any{"a": 1}); err != nil {
+		t.Fatal(err)
+	}
+	cs := newState(t, st, config.Config{BootstrapToken: "boot"})
+	if cs.Mode() != ModeUnclaimed {
+		t.Fatalf("mode = %q", cs.Mode())
+	}
+	if err := cs.Claim(context.Background(), goodKey, "http://a", "", ""); !errors.Is(err, ErrBadBootstrapToken) {
+		t.Fatalf("claim without token err = %v", err)
+	}
+	if err := cs.Claim(context.Background(), goodKey, "http://a", "", "boot"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestClaimRejectsCredentialedOrDecoratedURL(t *testing.T) {
+	cs := newState(t, openStore(t), config.Config{})
+	for _, u := range []string{
+		"http://user:pass@frappe:8080",
+		"http://user@frappe:8080",
+		"http://frappe:8080/?x=1",
+		"http://frappe:8080/#frag",
+	} {
+		err := cs.Claim(context.Background(), goodKey, u, "", "")
+		if !errors.Is(err, ErrBadRequest) {
+			t.Errorf("%q: err = %v, want ErrBadRequest", u, err)
+		}
+		if err != nil && strings.Contains(err.Error(), "pass") {
+			t.Errorf("%q: error leaks userinfo: %v", u, err)
+		}
+	}
+}

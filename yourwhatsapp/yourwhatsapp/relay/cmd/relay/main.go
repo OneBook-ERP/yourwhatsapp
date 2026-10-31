@@ -130,7 +130,11 @@ func restoreWhenClaimed(ctx context.Context, cs *claim.State, m restorer, log *s
 
 // restoreSessions restarts every paired session and arms the lost-send
 // failover, whose grace gives the restored sessions time to reconnect.
+// A claim that lands during shutdown restores nothing.
 func restoreSessions(ctx context.Context, m restorer, log *slog.Logger) {
+	if ctx.Err() != nil {
+		return
+	}
 	if err := m.RestoreAll(ctx); err != nil {
 		log.Error("restore sessions", "error", err)
 	}

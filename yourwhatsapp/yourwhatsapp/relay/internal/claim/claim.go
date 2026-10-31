@@ -31,6 +31,9 @@ var (
 	ErrAlreadyClaimed    = errors.New("relay already claimed")
 	ErrBadBootstrapToken = errors.New("bad bootstrap token")
 	ErrBadRequest        = errors.New("bad claim request")
+	// ErrPopulatedUnclaimed stops a relay whose data dir holds linked numbers
+	// but no claim from handing them to whoever claims it first.
+	ErrPopulatedUnclaimed = errors.New("relay data dir has linked numbers but no claim; set RELAY_API_KEY or RELAY_BOOTSTRAP_TOKEN")
 )
 
 type State struct {
@@ -47,7 +50,8 @@ type State struct {
 }
 
 // New loads the relay's identity: env when cfg.APIKey is set, else the stored
-// claim, else unclaimed.
+// claim, else unclaimed. An unclaimed store that already holds data is
+// refused unless a bootstrap token guards /claim.
 func New(st *store.Store, cfg config.Config, now func() time.Time) (*State, error) {
 	s := &State{st: st, bootstrapToken: cfg.BootstrapToken, now: now, mode: ModeUnclaimed}
 	if cfg.APIKey != "" {
@@ -60,6 +64,16 @@ func New(st *store.Store, cfg config.Config, now func() time.Time) (*State, erro
 	}
 	if rc != nil {
 		s.mode, s.apiKey, s.callbackURL, s.siteName = ModeClaimed, rc.APIKey, rc.CallbackURL, rc.SiteName
+		return s, nil
+	}
+	if cfg.BootstrapToken == "" {
+		populated, err := st.HasAnyData(context.Background())
+		if err != nil {
+			return nil, fmt.Errorf("inspect data dir: %w", err)
+		}
+		if populated {
+			return nil, ErrPopulatedUnclaimed
+		}
 	}
 	return s, nil
 }
@@ -133,7 +147,7 @@ func (s *State) claim(ctx context.Context, apiKey, callbackURL, siteName, bootst
 	return hooks, nil
 }
 
-// validate never echoes the key: errors may reach the caller and the log.
+// validate never echoes the key or the URL: errors may reach the caller and the log.
 func validate(apiKey, callbackURL string) error {
 	if len(apiKey) < MinKeyLen {
 		return fmt.Errorf("%w: api_key must be at least %d characters", ErrBadRequest, MinKeyLen)
@@ -141,6 +155,9 @@ func validate(apiKey, callbackURL string) error {
 	u, err := url.Parse(callbackURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("%w: callback_url must be an http(s) URL", ErrBadRequest)
+	}
+	if u.User != nil || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return fmt.Errorf("%w: callback_url must not carry credentials, a query or a fragment", ErrBadRequest)
 	}
 	return nil
 }

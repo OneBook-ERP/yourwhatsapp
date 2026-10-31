@@ -69,6 +69,7 @@ func TestClaimRouteErrors(t *testing.T) {
 		{"bootstrap wrong", config.Config{BootstrapToken: "boot"}, claimJSON(claimKey, "http://a", "nope"), 401, "bad_bootstrap_token"},
 		{"short key", config.Config{}, claimJSON("short", "http://a", ""), 400, "bad_request"},
 		{"bad url", config.Config{}, claimJSON(claimKey, "ftp://a", ""), 400, "bad_request"},
+		{"userinfo url", config.Config{}, claimJSON(claimKey, "http://u:p@a", ""), 400, "bad_request"},
 		{"bad json", config.Config{}, "{", 400, "bad_request"},
 	}
 	for _, c := range cases {

@@ -58,3 +58,14 @@ func (s *Store) InsertRelayConfig(ctx context.Context, rc RelayConfig) error {
 	}
 	return nil
 }
+
+// HasAnyData reports whether the store holds linked numbers or relay state:
+// accounts, whatsmeow devices, or queued callbacks.
+func (s *Store) HasAnyData(ctx context.Context) (bool, error) {
+	var has bool
+	err := s.DB.QueryRowContext(ctx, `SELECT
+		EXISTS (SELECT 1 FROM accounts) OR
+		EXISTS (SELECT 1 FROM whatsmeow_device) OR
+		EXISTS (SELECT 1 FROM outbox)`).Scan(&has)
+	return has, err
+}

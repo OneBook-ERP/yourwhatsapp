@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"time"
 
 	"yourwhatsapp/relay/internal/claim"
@@ -88,7 +89,7 @@ func (h *handler) claim(w http.ResponseWriter, r *http.Request) {
 	err := h.cs.Claim(r.Context(), b.APIKey, b.CallbackURL, b.SiteName, b.BootstrapToken)
 	switch {
 	case err == nil:
-		h.log.Info("relay claimed", "callback_url", b.CallbackURL, "site_name", b.SiteName)
+		h.log.Info("relay claimed", "callback_url", redactedURL(b.CallbackURL), "site_name", b.SiteName)
 		writeJSON(w, http.StatusOK, map[string]any{"claimed": true})
 	case errors.Is(err, claim.ErrAlreadyClaimed):
 		writeError(w, http.StatusConflict, "already_claimed", err.Error())
@@ -100,6 +101,15 @@ func (h *handler) claim(w http.ResponseWriter, r *http.Request) {
 	default:
 		h.fail(w, r, err)
 	}
+}
+
+// redactedURL hides any password before a URL reaches the log.
+func redactedURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil {
+		return ""
+	}
+	return u.Redacted()
 }
 
 type proxyBody struct {
