@@ -9,12 +9,14 @@
             "fieldname": "default_incoming_account",
             "fieldtype": "Link",
             "label": "Default Incoming Account",
+            "description": "Only needed so CRM shows WhatsApp; sending rotates across all Active numbers.",
             "options": "WhatsApp Account"
         },
         {
             "fieldname": "default_outgoing_account",
             "fieldtype": "Link",
             "label": "Default Outgoing Account",
+            "description": "Only needed so CRM shows WhatsApp; sending rotates across all Active numbers.",
             "options": "WhatsApp Account"
         },
         {

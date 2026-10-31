@@ -2,10 +2,10 @@ import requests
 import frappe
 from frappe import _
 from frappe.model.document import Document
-from frappe.utils import cint, now_datetime, random_string
+from frappe.utils import random_string
 
-from yourwhatsapp.yourwhatsapp.api import relay_may_set_status
 from yourwhatsapp.yourwhatsapp.relay_client import relay_settings
+from yourwhatsapp.yourwhatsapp.routing import set_account_active
 
 TIMEOUT = 15
 ALREADY_PAIRED = "already_paired"
@@ -23,8 +23,8 @@ class WhatsAppAccount(Document):
 		status = result.get("status")
 		if status == "paused":
 			frappe.throw("Account is paused on the relay; use Resume")
-		if status == "connected" and relay_may_set_status(self.name, "Active"):
-			self._set_active()
+		if status == "connected":
+			set_account_active(self.name)
 		return result
 
 	@frappe.whitelist()
@@ -49,10 +49,10 @@ class WhatsAppAccount(Document):
 	def resume(self):
 		self._check_admin()
 		result = self._relay_post("resume", self._proxy_body())
+		# An admin resuming lifts their own Paused/ban hold, which the relay may not.
+		self.db_set("status", "Disconnected")
 		if result.get("status") == "connected":
-			self._set_active()
-		else:
-			self.db_set("status", "Disconnected")
+			set_account_active(self.name)
 
 	@frappe.whitelist()
 	def logout(self):
@@ -70,15 +70,11 @@ class WhatsAppAccount(Document):
 		and only call it Active once the relay says it is connected."""
 		result = self._relay_post("start", self._proxy_body())
 		if result.get("status") == "connected":
-			if relay_may_set_status(self.name, "Active"):
-				self._set_active()
+			set_account_active(self.name)
 			message = _("This number is already linked and connected.")
 		else:
 			message = _("This number is already linked; connecting…")
 		return {"already_paired": True, "message": message}
-
-	def _set_active(self):
-		self.db_set({"status": "Active", "connected_at": now_datetime()})
 
 	def _check_admin(self):
 		roles = frappe.get_roles()
@@ -101,20 +97,6 @@ class WhatsAppAccount(Document):
 		if response.status_code >= 400:
 			frappe.throw(_relay_error_message(response))
 		return response.json()
-
-	def validate(self):
-		self._enforce_single_default("is_default_incoming")
-		self._enforce_single_default("is_default_outgoing")
-
-	def _enforce_single_default(self, fieldname):
-		if not cint(self.get(fieldname)):
-			return
-		others = frappe.get_all(
-			"WhatsApp Account",
-			filters={fieldname: 1, "name": ["!=", self.name]},
-		)
-		for other in others:
-			frappe.db.set_value("WhatsApp Account", other.name, fieldname, 0)
 
 
 def _is_already_paired(response):

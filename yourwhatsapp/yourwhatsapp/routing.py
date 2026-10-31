@@ -64,6 +64,32 @@ def mark_rate_limited(account, until=None):
 	frappe.db.set_value("WhatsApp Account", account, values)
 
 
+def set_account_active(account, connected_at=True):
+	"""Mark an account Active unless an admin hold stops the relay from doing so.
+
+	Every path that activates an account goes through here, so the Settings
+	defaults CRM needs (it only checks that one is set) fill themselves.
+	"""
+	from yourwhatsapp.yourwhatsapp.api import relay_may_set_status
+
+	if not relay_may_set_status(account, "Active"):
+		return False
+	values = {"status": "Active", "rate_limited_until": None}
+	if connected_at:
+		values["connected_at"] = now_datetime()
+	frappe.db.set_value("WhatsApp Account", account, values)
+	fill_default_accounts(account)
+	return True
+
+
+def fill_default_accounts(account):
+	"""Point each empty or dangling Settings default at `account`; sending never reads them."""
+	for fieldname in ("default_outgoing_account", "default_incoming_account"):
+		current = frappe.db.get_single_value("WhatsApp Settings", fieldname)
+		if not current or not frappe.db.exists("WhatsApp Account", current):
+			frappe.db.set_single_value("WhatsApp Settings", fieldname, account)
+
+
 def mark_disconnected(account):
 	"""Record that the relay has no live session for the account, unless an admin Paused it."""
 	from yourwhatsapp.yourwhatsapp.api import relay_may_set_status

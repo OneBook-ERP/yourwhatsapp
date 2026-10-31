@@ -1,6 +1,8 @@
 import frappe
 from frappe.utils import now_datetime
 
+from yourwhatsapp.yourwhatsapp.routing import set_account_active
+
 
 def reset_daily_message_counts():
 	frappe.db.set_value("WhatsApp Account", {}, "daily_message_count", 0, update_modified=False)
@@ -14,9 +16,7 @@ def recover_rate_limited_accounts():
 		filters={"status": "RateLimited", "rate_limited_until": ["between", ["2000-01-01", now_datetime()]]},
 		pluck="name",
 	):
-		frappe.db.set_value(
-			"WhatsApp Account", account, {"status": "Active", "rate_limited_until": None}
-		)
+		set_account_active(account, connected_at=False)
 
 
 def retry_relay_unavailable_messages():

@@ -38,16 +38,6 @@
             "fieldtype": "Column Break"
         },
         {
-            "fieldname": "is_default_incoming",
-            "fieldtype": "Check",
-            "label": "Is Default Incoming"
-        },
-        {
-            "fieldname": "is_default_outgoing",
-            "fieldtype": "Check",
-            "label": "Is Default Outgoing"
-        },
-        {
             "fieldname": "section_break_routing",
             "fieldtype": "Section Break",
             "label": "Routing"
