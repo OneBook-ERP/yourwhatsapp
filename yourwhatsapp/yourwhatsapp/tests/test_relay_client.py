@@ -6,7 +6,7 @@ import requests
 from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, now_datetime
 
-from yourwhatsapp.yourwhatsapp import api, relay_client, tasks
+from yourwhatsapp.yourwhatsapp import api, relay_client, routing, tasks
 from yourwhatsapp.yourwhatsapp.routing import to_system_datetime
 
 RELAY_KEY = "test-relay-key"
@@ -200,6 +200,20 @@ class TestRelayClient(IntegrationTestCase):
 		frappe.db.set_value("WhatsApp Account", self.account_a.name, "status", "Paused")
 		self._send(msg, self._session_unavailable("session is not running"), relay_response(202))
 		self.assertEqual(self._account_value(self.account_a, "status"), "Paused")
+
+	def test_session_down_keeps_held_rate_limited(self):
+		cases = {
+			"manual": (None, "RateLimited"),
+			"pending ban": (add_to_date(now_datetime(), hours=1), "RateLimited"),
+			"expired ban": (add_to_date(now_datetime(), minutes=-5), "Disconnected"),
+		}
+		for case, (until, expected) in cases.items():
+			with self.subTest(case=case):
+				frappe.db.set_value(
+					"WhatsApp Account", self.account_a.name, {"status": "RateLimited", "rate_limited_until": until}
+				)
+				routing.mark_disconnected(self.account_a.name)
+				self.assertEqual(self._account_value(self.account_a, "status"), expected)
 
 	def test_failover_skips_recipients_own_account(self):
 		frappe.db.set_value("WhatsApp Account", self.account_b.name, "status", "Disconnected")

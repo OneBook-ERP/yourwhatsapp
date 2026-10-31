@@ -223,8 +223,9 @@ def relay_may_set_status(account: str, status: str) -> bool:
 	current, until = frappe.db.get_value("WhatsApp Account", account, ["status", "rate_limited_until"])
 	if current == "Paused" and status in ("Active", "Disconnected"):
 		return False
-	if current == "RateLimited" and status == "Active":
-		# Only a relay-originated ban (has an expiry) lifts itself, once it has passed.
+	if current == "RateLimited" and status in ("Active", "Disconnected"):
+		# A held ban (manual, or a relay ban not yet expired) is kept; only a
+		# relay-originated ban (has an expiry) lifts itself, once it has passed.
 		return bool(until) and get_datetime(until) <= now_datetime()
 	return True
 
