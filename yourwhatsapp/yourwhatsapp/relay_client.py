@@ -19,6 +19,8 @@ SEND_METHOD = "yourwhatsapp.yourwhatsapp.relay_client.send_message"
 # When no account could be reached at all (relay down or restarting), the
 # message is parked Queued and re-dispatched after these delays; then Failed.
 RELAY_RETRY_MINUTES = (1, 2, 5, 10, 20)
+# Async error_code for sends a relay restart lost; retried on the same account.
+RELAY_RESTARTED = "relay_restarted"
 # A 409 session_unavailable whose detail means the relay has no live session
 # for the account (as opposed to a transient state such as a full queue). The
 # relay's exact details ("session is not running", "session is not_started",
@@ -95,7 +97,7 @@ def handle_async_failure(message_name: str, error_code: str):
 	if doc.type != "Outgoing" or doc.status != "Failed":
 		return
 
-	if error_code == "relay_restarted":
+	if error_code == RELAY_RESTARTED:
 		# The account is fine, the relay just lost the queued send: retry it
 		# there later instead of failing over (it may be the only number).
 		_retry_later(doc, f"Relay error: {error_code}")

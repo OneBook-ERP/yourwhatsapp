@@ -2,12 +2,12 @@ import hmac
 import frappe
 from frappe.utils import get_datetime, now_datetime
 
-from yourwhatsapp.yourwhatsapp.relay_client import increment_daily_count
+from yourwhatsapp.yourwhatsapp.relay_client import RELAY_RESTARTED, increment_daily_count
 from yourwhatsapp.yourwhatsapp.routing import mark_rate_limited, to_system_datetime
 
 STATUS_RANK = {"Queued": 0, "Sent": 1, "Delivered": 2, "Read": 3}
 # relay_restarted goes through the same job, which retries it on the same account.
-FAILOVER_ERROR_CODES = {"session_unavailable", "send_failed", "temp_banned", "relay_restarted"}
+FAILOVER_ERROR_CODES = {"session_unavailable", "send_failed", "temp_banned", RELAY_RESTARTED}
 FAILOVER_METHOD = "yourwhatsapp.yourwhatsapp.relay_client.handle_async_failure"
 
 
