@@ -21,6 +21,8 @@ Frappe CRM (installed, unmodified) ──calls──> crm.api.whatsapp.*
                                           real WhatsApp (unofficial)
 ```
 
+**Relay engine migration (decided 2026-10-31):** the Node/whatsapp-web.js relay is being replaced by a Go relay on **whatsmeow** (direct multi-device websocket, no headless browser), keeping the same HTTP contract with Frappe. Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`; tracking: `ROADMAP.md` Phase 1.6 §0. Until cutover, the browser-specific gotchas below (Chromium, `ready` event, `_serialized`, user-agent) still apply to the running Node relay; after cutover they're obsolete and should be removed.
+
 Key insight that shapes the whole design: **Frappe CRM already has a full WhatsApp integration seam** (`crm/api/whatsapp.py`, `WhatsAppBox.vue`, etc.) that works purely off doctype *names* (`WhatsApp Message`, `WhatsApp Account`, `WhatsApp Settings`, `WhatsApp Templates`) — it doesn't care which app supplies them. This app supplies doctypes with the same names/shape as the well-known `frappe_whatsapp` (Meta Cloud API) app, so CRM's frontend and hooks work unmodified, but the controller sends through the relay instead of Meta.
 
 ## Running locally
