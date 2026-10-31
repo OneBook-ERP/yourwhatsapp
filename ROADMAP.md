@@ -40,6 +40,7 @@ Each phase lists an objective, detailed tasks, and status. Update statuses as wo
 Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`. Comparison scored whatsmeow 4.20, Baileys 3.95, Evolution API 3.20 (rejected: v2.4+ requires licensing-server activation), whatsapp-web.js 2.70. No headless browser means the Chromium-specific items below (tini for browser children, `CHROMIUM_PATH`, orphan cleanup, user-agent) are dropped, and several 🚫 items are delivered by the new relay itself (marked "→ §0").
 - [ ] 🚫 Go relay with the same HTTP contract: QR + phone-number pairing, SQLite session store, auto-restore on boot, graceful SIGTERM, persistent callback outbox, idempotent send, per-account send queue with jittered delay + typing, optional per-account proxy, `TemporaryBan` → `RateLimited`.
 - [ ] 🚫 Frappe side: error-code-aware failover, monotonic status, inbound dedupe, `is_lid_sender`, `account_event`, account form buttons (Pair with code, Pause/Resume, Logout), `RateLimited` auto-recovery job.
+- [x] Live-test fixes (2026-10-31): template `status`/`for_doctype` so CRM's picker lists templates; outgoing `to` and inbound `from` stored digits only, so a customer's thread links to the same Lead/Deal whichever number carried it; routing and failover never pick the account whose own number is the recipient; media messages need an attachment; a relay 409 "session not running / logged out" marks the account Disconnected; Connect / Pair on an already-paired number sets Active instead of erroring (buttons hidden while Active); sends lost in a relay restart (`relay_restarted`) retry on the same account; orphan public QR images deleted. **No sticky sender**: every outgoing message, replies included, rotates (client requirement, see CLAUDE.md).
 - [ ] Relink every number once; verify against real numbers; delete the Node relay.
 
 ### A. Docker deployment + UI-only setup
@@ -78,7 +79,7 @@ Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`. Compariso
 ### E. Functional bugs (from 2026-09-18 audit)
 - [x] Status updates (`status@broadcast`), groups (`@g.us`), broadcast lists and channels no longer stored as inbound CRM messages — relay filters to 1:1 chats only. Existing rows kept.
 - [x] Acks for messages CRM didn't send (typed on the phone, groups) no longer raise `DoesNotExistError` into Error Log.
-- [ ] 🚫 (→ §0) Normalize outgoing numbers to digits only (`+91 98765 43210` → `919876543210`) and validate with `client.getNumberId()` before sending — `+`-prefixed numbers currently fail with 502.
+- [x] 🚫 (→ §0) Normalize outgoing numbers to digits only (`+91 98765 43210` → `919876543210`) and validate with `client.getNumberId()` before sending — `+`-prefixed numbers currently fail with 502.
 - [ ] 🚫 `crm.api.whatsapp.send_whatsapp_template` sends no parameters → templates go out with literal `{{1}}`. Resolve params from the reference doc (or block templates with unresolved placeholders).
 - [ ] Reactions (`content_type: reaction`) are sent as a plain text emoji — use `msg.react()` on the target message.
 - [ ] Replies: pass `quotedMessageId` on outgoing replies; send `reply_to_message_id` on inbound quoted messages so CRM shows reply context.
