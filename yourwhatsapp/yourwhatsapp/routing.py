@@ -64,6 +64,14 @@ def mark_rate_limited(account, until=None):
 	frappe.db.set_value("WhatsApp Account", account, values)
 
 
+def mark_disconnected(account):
+	"""Record that the relay has no live session for the account, unless an admin Paused it."""
+	from yourwhatsapp.yourwhatsapp.api import relay_may_set_status
+
+	if relay_may_set_status(account, "Disconnected"):
+		frappe.db.set_value("WhatsApp Account", account, "status", "Disconnected")
+
+
 def to_system_datetime(rfc3339: str) -> datetime:
 	"""RFC3339 from the relay -> naive datetime in the system timezone, as Datetime fields expect."""
 	parsed = datetime.fromisoformat(rfc3339.replace("Z", "+00:00"))

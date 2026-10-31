@@ -6,7 +6,12 @@ import frappe
 import requests
 from frappe.utils import add_to_date, cint, now_datetime
 
-from yourwhatsapp.yourwhatsapp.routing import mark_rate_limited, pick_account, to_system_datetime
+from yourwhatsapp.yourwhatsapp.routing import (
+	mark_disconnected,
+	mark_rate_limited,
+	pick_account,
+	to_system_datetime,
+)
 
 DISPATCH_BUDGET_SECONDS = 240
 TIMEOUT = 30  # the relay only queues the send, so a slow answer means trouble
@@ -14,6 +19,9 @@ SEND_METHOD = "yourwhatsapp.yourwhatsapp.relay_client.send_message"
 # When no account could be reached at all (relay down or restarting), the
 # message is parked Queued and re-dispatched after these delays; then Failed.
 RELAY_RETRY_MINUTES = (1, 2, 5, 10, 20)
+# A 409 session_unavailable whose detail means the relay has no live session
+# for the account (as opposed to a transient state such as a full queue).
+SESSION_DOWN = re.compile(r"not running|not[_ ]started|logged[_ ]out")
 
 
 def relay_settings():
@@ -191,6 +199,14 @@ def _error_code(response) -> str | None:
 		return None
 
 
+def _session_down(response) -> bool:
+	try:
+		body = response.json()
+	except Exception:
+		return False
+	return body.get("error") == "session_unavailable" and bool(SESSION_DOWN.search(body.get("detail") or ""))
+
+
 def _ban_expiry(response):
 	"""The relay's 429 detail ends with 'temporarily banned until <RFC3339>'."""
 	try:
@@ -246,6 +262,8 @@ def _dispatch(doc):
 			return
 		if status == 429:
 			mark_rate_limited(account.name, _ban_expiry(response))
+		if status == 409 and _session_down(response):
+			mark_disconnected(account.name)
 		if status != 409:
 			relay_unavailable = False
 		previous_account = account.name

@@ -178,6 +178,29 @@ class TestRelayClient(IntegrationTestCase):
 		self.assertEqual(row.status, "Failed")
 		self.assertIn("no other WhatsApp Account", row.error_reason)
 
+	def _session_unavailable(self, detail):
+		return relay_response(409, {"error": "session_unavailable", "detail": detail})
+
+	def test_409_session_down_marks_account_disconnected(self):
+		for detail in ("session is not running", "session is not_started", "session is logged_out"):
+			with self.subTest(detail=detail):
+				frappe.db.set_value("WhatsApp Account", self.account_a.name, "status", "Active")
+				msg = self._make_message()
+				self._send(msg, self._session_unavailable(detail), relay_response(202))
+				self.assertEqual(self._account_value(self.account_a, "status"), "Disconnected")
+				self.assertEqual(self._row(msg.name).whatsapp_account, self.account_b.name)
+
+	def test_409_queue_full_keeps_account_active(self):
+		msg = self._make_message()
+		self._send(msg, self._session_unavailable("send queue is full"), relay_response(202))
+		self.assertEqual(self._account_value(self.account_a, "status"), "Active")
+
+	def test_409_session_down_keeps_paused(self):
+		msg = self._make_message()
+		frappe.db.set_value("WhatsApp Account", self.account_a.name, "status", "Paused")
+		self._send(msg, self._session_unavailable("session is not running"), relay_response(202))
+		self.assertEqual(self._account_value(self.account_a, "status"), "Paused")
+
 	def test_failover_skips_recipients_own_account(self):
 		frappe.db.set_value("WhatsApp Account", self.account_b.name, "status", "Disconnected")
 		self._make_account("Client Recipient", phone_number="+1 555 123 4567")
