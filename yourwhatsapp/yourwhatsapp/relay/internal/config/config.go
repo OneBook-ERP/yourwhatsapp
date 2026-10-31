@@ -18,6 +18,8 @@ type Config struct {
 	DataDir        string
 	SendDelayMin   time.Duration
 	SendDelayMax   time.Duration
+	// MediaMaxBytes caps inbound media the relay downloads and forwards.
+	MediaMaxBytes int64
 }
 
 func Load() (Config, error) {
@@ -46,6 +48,12 @@ func Load() (Config, error) {
 	}
 	if c.SendDelayMin > c.SendDelayMax {
 		return Config{}, errors.New("SEND_DELAY_MIN must not exceed SEND_DELAY_MAX")
+	}
+	if c.MediaMaxBytes, err = strconv.ParseInt(envOr("MEDIA_MAX_BYTES", "15728640"), 10, 64); err != nil {
+		return Config{}, fmt.Errorf("MEDIA_MAX_BYTES: %w", err)
+	}
+	if c.MediaMaxBytes <= 0 {
+		return Config{}, errors.New("MEDIA_MAX_BYTES must be positive")
 	}
 	return c, nil
 }

@@ -48,6 +48,7 @@ type fakeClient struct {
 	uploads     []whatsmeow.MediaType
 	download    []byte
 	downloadErr error
+	downloads   int
 	pairPhone   string
 	afterSend   func(id string) // run on its own goroutine, like whatsmeow's handler queue
 }
@@ -178,6 +179,7 @@ func (f *fakeClient) SendChatPresence(_ context.Context, _ types.JID, state type
 func (f *fakeClient) Download(context.Context, whatsmeow.DownloadableMessage) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.downloads++
 	return f.download, f.downloadErr
 }
 

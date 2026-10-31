@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -386,17 +387,50 @@ func (s *Session) onMessage(e *events.Message) {
 		return
 	}
 	if media != nil {
-		ctx, cancel := context.WithTimeout(s.ctx, downloadTimeout)
-		data, err := s.client.Download(ctx, media)
-		cancel()
-		if err != nil {
-			s.log.Warn("inbound media download failed; delivering without media", "message_id", p.MessageID, "error", err)
-			p.MediaMimetype, p.MediaFilename = "", ""
-		} else {
-			p.MediaBase64 = base64.StdEncoding.EncodeToString(data)
-		}
+		s.attachMedia(&p, media)
 	}
 	s.callback(outbox.MethodInbound, p)
+}
+
+// attachMedia downloads inbound media into p. Media over MEDIA_MAX_BYTES (by
+// its declared size, or by the downloaded size when none is declared) is
+// replaced by a note in the text so the message itself still arrives.
+func (s *Session) attachMedia(p *convert.InboundPayload, media whatsmeow.DownloadableMessage) {
+	if sized, ok := media.(interface{ GetFileLength() uint64 }); ok && s.overMediaCap(int64(sized.GetFileLength())) {
+		s.dropOversizeMedia(p, int64(sized.GetFileLength()))
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, downloadTimeout)
+	data, err := s.client.Download(ctx, media)
+	cancel()
+	switch {
+	case err != nil:
+		s.log.Warn("inbound media download failed; delivering without media", "message_id", p.MessageID, "error", err)
+		p.MediaMimetype, p.MediaFilename = "", ""
+	case s.overMediaCap(int64(len(data))):
+		s.dropOversizeMedia(p, int64(len(data)))
+	default:
+		p.MediaBase64 = base64.StdEncoding.EncodeToString(data)
+	}
+}
+
+func (s *Session) overMediaCap(size int64) bool {
+	limit := s.m.cfg.MediaMaxBytes
+	return limit > 0 && size > limit
+}
+
+func (s *Session) dropOversizeMedia(p *convert.InboundPayload, size int64) {
+	s.log.Warn("inbound media over MEDIA_MAX_BYTES; delivering without media", "message_id", p.MessageID, "size", size)
+	what := p.ContentType
+	if p.ContentType == "document" && p.MediaFilename != "" {
+		what = p.MediaFilename
+	}
+	note := fmt.Sprintf("[attachment too large: %s, %.1f MB]", what, float64(size)/(1<<20))
+	if p.Message != "" {
+		note = p.Message + "\n" + note
+	}
+	p.ContentType, p.Message = "text", note
+	p.MediaMimetype, p.MediaFilename = "", ""
 }
 
 func (s *Session) resolvePN(lid types.JID) (types.JID, bool) {
