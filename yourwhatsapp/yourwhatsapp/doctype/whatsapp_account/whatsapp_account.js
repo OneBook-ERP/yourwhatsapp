@@ -6,7 +6,8 @@ frappe.ui.form.on("WhatsApp Account", {
 	refresh(frm) {
 		if (frm.is_new()) return;
 
-		add_connect_button(frm);
+		// A linked, live number needs no pairing: only Pause / Logout apply.
+		if (frm.doc.status !== "Active") add_connect_button(frm);
 		add_session_buttons(frm);
 
 		if (frm.doc.status === "Disconnected" && frm.doc.qr_code && !frm._qr_poll_active) {
@@ -21,7 +22,8 @@ function add_connect_button(frm) {
 		return;
 	}
 	frm.add_custom_button(__("Connect / Generate QR"), () => {
-		frm.call("connect").then(() => {
+		frm.call("connect").then((r) => {
+			if (already_paired(frm, r.message)) return;
 			frappe.show_alert({ message: __("Starting session — waiting for QR..."), indicator: "blue" });
 			poll_until_connected(frm);
 		});
@@ -42,7 +44,17 @@ function add_session_buttons(frm) {
 }
 
 function pair_with_code(frm) {
-	frm.call("pair_with_code").then((r) => show_pairing_dialog(frm, r.message.code));
+	frm.call("pair_with_code").then((r) => {
+		if (already_paired(frm, r.message)) return;
+		show_pairing_dialog(frm, r.message.code);
+	});
+}
+
+function already_paired(frm, result) {
+	if (!result || !result.already_paired) return false;
+	frappe.show_alert({ message: result.message, indicator: "green" });
+	frm.reload_doc();
+	return true;
 }
 
 function show_pairing_dialog(frm, code) {

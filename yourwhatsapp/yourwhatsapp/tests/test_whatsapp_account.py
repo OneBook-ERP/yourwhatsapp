@@ -102,11 +102,39 @@ class TestWhatsAppAccount(IntegrationTestCase):
 		self.assertEqual(post.call_args.kwargs["json"], {"phone": "+1 555 000 1111", "proxy": "socks5://proxy.test:1080"})
 
 	def test_pair_with_code_surfaces_relay_error(self):
-		body = {"error": "already_paired", "detail": "Session is already paired"}
-		with patch("requests.post", return_value=relay_response(409, body)):
+		body = {"error": "invalid_number", "detail": "invalid phone number"}
+		with patch("requests.post", return_value=relay_response(422, body)):
 			with self.assertRaises(frappe.ValidationError) as ctx:
 				self.account.pair_with_code()
-		self.assertIn("Session is already paired", str(ctx.exception))
+		self.assertIn("invalid phone number", str(ctx.exception))
+
+	ALREADY_PAIRED = {"error": "conflict", "detail": "session is already paired"}
+
+	def test_already_paired_sets_active_without_error(self):
+		for method in ("connect", "pair_with_code"):
+			with self.subTest(method=method):
+				self.account.db_set({"status": "Disconnected", "connected_at": None})
+				errors_before = frappe.db.count("Error Log")
+				with patch("requests.post", return_value=relay_response(409, self.ALREADY_PAIRED)):
+					result = getattr(self.account, method)()
+				self.assertTrue(result["already_paired"])
+				self.assertIn("already linked", result["message"])
+				self.assertNotIn("code", result)
+				row = self._account_row()
+				self.assertEqual(row.status, "Active")
+				self.assertIsNotNone(row.connected_at)
+				self.assertEqual(frappe.db.count("Error Log"), errors_before)
+
+	def test_already_paired_keeps_paused(self):
+		self.account.db_set("status", "Paused")
+		with patch("requests.post", return_value=relay_response(409, self.ALREADY_PAIRED)):
+			self.account.connect()
+		self.assertEqual(self._account_row().status, "Paused")
+
+	def test_relay_paused_conflict_still_throws(self):
+		body = {"error": "conflict", "detail": "session is paused"}
+		with patch("requests.post", return_value=relay_response(409, body)):
+			self.assertRaises(frappe.ValidationError, self.account.pair_with_code)
 
 	def test_relay_unreachable_shows_message(self):
 		with patch("requests.post", side_effect=requests.exceptions.ConnectionError("refused")):
