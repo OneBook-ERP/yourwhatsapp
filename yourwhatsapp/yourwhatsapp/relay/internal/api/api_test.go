@@ -36,8 +36,8 @@ func (f *fakeManager) PairCode(_ context.Context, _, _ string, proxy *string) (s
 }
 func (f *fakeManager) Status(string) (string, string, string) { return "connected", "1@s", "1" }
 func (f *fakeManager) Pause(context.Context, string) error    { return nil }
-func (f *fakeManager) Resume(context.Context, string, *string) error {
-	return nil
+func (f *fakeManager) Resume(context.Context, string, *string) (string, error) {
+	return "connected", nil
 }
 func (f *fakeManager) Logout(context.Context, string) error { return session.ErrUnknownSession }
 func (f *fakeManager) Send(_ context.Context, req session.SendRequest) *session.SendError {
@@ -109,6 +109,14 @@ func TestStartPassesProxy(t *testing.T) {
 	do(h, "POST", "/session/t2/start", "", true)
 	if fm.startProxy != nil {
 		t.Fatalf("empty body should give nil proxy")
+	}
+}
+
+func TestResumeReturnsStatus(t *testing.T) {
+	h, _ := newServer(t, &fakeManager{})
+	rec := do(h, "POST", "/session/t1/resume", `{"proxy":""}`, true)
+	if m := decode(t, rec); rec.Code != 200 || m["status"] != "connected" {
+		t.Fatalf("resume = %d %v", rec.Code, m)
 	}
 }
 

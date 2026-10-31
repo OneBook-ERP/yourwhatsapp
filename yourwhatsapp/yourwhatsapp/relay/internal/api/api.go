@@ -27,7 +27,7 @@ type Manager interface {
 	PairCode(ctx context.Context, id, rawPhone string, proxy *string) (string, error)
 	Status(id string) (status, jid, phoneNumber string)
 	Pause(ctx context.Context, id string) error
-	Resume(ctx context.Context, id string, proxy *string) error
+	Resume(ctx context.Context, id string, proxy *string) (string, error)
 	Logout(ctx context.Context, id string) error
 	Send(ctx context.Context, req session.SendRequest) *session.SendError
 }
@@ -119,11 +119,12 @@ func (h *handler) resume(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &body, true) {
 		return
 	}
-	if err := h.m.Resume(r.Context(), r.PathValue("id"), body.Proxy); err != nil {
+	status, err := h.m.Resume(r.Context(), r.PathValue("id"), body.Proxy)
+	if err != nil {
 		h.fail(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true, "status": status})
 }
 
 func (h *handler) logout(w http.ResponseWriter, r *http.Request) {

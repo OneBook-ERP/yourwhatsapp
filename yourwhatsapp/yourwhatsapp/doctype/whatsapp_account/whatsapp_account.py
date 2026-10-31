@@ -1,8 +1,9 @@
 import requests
 import frappe
 from frappe.model.document import Document
-from frappe.utils import cint, random_string
+from frappe.utils import cint, now_datetime, random_string
 
+from yourwhatsapp.yourwhatsapp.api import relay_may_set_status
 from yourwhatsapp.yourwhatsapp.relay_client import relay_settings
 
 TIMEOUT = 15
@@ -16,14 +17,20 @@ class WhatsAppAccount(Document):
 	@frappe.whitelist()
 	def connect(self):
 		self._check_admin()
-		return self._relay_post("start", {"proxy": self.proxy or None})
+		result = self._relay_post("start", self._proxy_body())
+		status = result.get("status")
+		if status == "paused":
+			frappe.throw("Account is paused on the relay; use Resume")
+		if status == "connected" and relay_may_set_status(self.name, "Active"):
+			self._set_active()
+		return result
 
 	@frappe.whitelist()
 	def pair_with_code(self):
 		self._check_admin()
 		if not self.phone_number:
 			frappe.throw("Set the account's phone number before pairing with a code.")
-		result = self._relay_post("pair-code", {"phone": self.phone_number, "proxy": self.proxy or None})
+		result = self._relay_post("pair-code", {"phone": self.phone_number, **self._proxy_body()})
 		return {"code": result["code"]}
 
 	@frappe.whitelist()
@@ -35,14 +42,25 @@ class WhatsAppAccount(Document):
 	@frappe.whitelist()
 	def resume(self):
 		self._check_admin()
-		self._relay_post("resume", {"proxy": self.proxy or None})
-		self.db_set("status", "Disconnected")
+		result = self._relay_post("resume", self._proxy_body())
+		if result.get("status") == "connected":
+			self._set_active()
+		else:
+			self.db_set("status", "Disconnected")
 
 	@frappe.whitelist()
 	def logout(self):
 		self._check_admin()
 		self._relay_post("logout")
 		self.db_set({"status": "Disconnected", "connected_at": None})
+
+	def _proxy_body(self):
+		# "" clears the relay's stored proxy; null would keep it. A change
+		# applies on the next connect (Pause, then Resume, for a live session).
+		return {"proxy": self.proxy or ""}
+
+	def _set_active(self):
+		self.db_set({"status": "Active", "connected_at": now_datetime()})
 
 	def _check_admin(self):
 		roles = frappe.get_roles()

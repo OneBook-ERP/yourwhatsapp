@@ -202,7 +202,7 @@ def update_qr(session_id: str, qr_base64: str | None = None, status: str | None 
 	if not account:
 		frappe.throw(f"No WhatsApp Account found for session {session_id}", frappe.DoesNotExistError)
 
-	if status and _relay_may_set_status(account, status):
+	if status and relay_may_set_status(account, status):
 		frappe.db.set_value("WhatsApp Account", account, "status", status)
 		if status == "Active":
 			frappe.db.set_value("WhatsApp Account", account, "connected_at", now_datetime())
@@ -217,7 +217,7 @@ def update_qr(session_id: str, qr_base64: str | None = None, status: str | None 
 	return {"ok": True}
 
 
-def _relay_may_set_status(account: str, status: str) -> bool:
+def relay_may_set_status(account: str, status: str) -> bool:
 	"""Frappe owns admin intent (Paused, manual RateLimited); the relay owns connection facts."""
 	current, until = frappe.db.get_value("WhatsApp Account", account, ["status", "rate_limited_until"])
 	if current == "Paused" and status in ("Active", "Disconnected"):

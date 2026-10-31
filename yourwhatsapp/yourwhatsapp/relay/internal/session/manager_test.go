@@ -177,11 +177,52 @@ func TestPauseAndResume(t *testing.T) {
 	if st, _ := h.m.Start(ctx, "A", nil); st != StatusPaused || h.clientCount() != 1 {
 		t.Errorf("Start on paused = %s, clients = %d", st, h.clientCount())
 	}
-	if err := h.m.Resume(ctx, "A", nil); err != nil {
-		t.Fatal(err)
+	if st, err := h.m.Resume(ctx, "A", nil); err != nil || st != StatusConnecting {
+		t.Fatalf("Resume = %s, %v", st, err)
 	}
 	if h.clientCount() != 2 || h.client(1).connects != 1 {
 		t.Errorf("resume did not reconnect: clients = %d", h.clientCount())
+	}
+}
+
+// Frappe may have missed (or overridden) the Active push; Start and Resume
+// on an already-connected session report connected and push Active again.
+func TestStartAndResumeOnConnectedRepushActive(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.connected("A", testJID)
+	if got := statusPushes(h); len(got) != 1 || got[0] != "Active" {
+		t.Fatalf("pushes after connect = %v", got)
+	}
+	if st, err := h.m.Start(ctx, "A", nil); err != nil || st != StatusConnected {
+		t.Fatalf("Start = %s, %v", st, err)
+	}
+	if st, err := h.m.Resume(ctx, "A", nil); err != nil || st != StatusConnected {
+		t.Fatalf("Resume = %s, %v", st, err)
+	}
+	if got := statusPushes(h); len(got) != 3 || got[1] != "Active" || got[2] != "Active" {
+		t.Errorf("pushes = %v, want Active re-pushed by Start and Resume", got)
+	}
+	if h.clientCount() != 1 {
+		t.Errorf("clients = %d, want the running one kept", h.clientCount())
+	}
+}
+
+func TestLogoutClearsPaused(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.connected("A", testJID)
+	if err := h.m.Pause(ctx, "A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.m.Logout(ctx, "A"); err != nil {
+		t.Fatal(err)
+	}
+	if acct, _, _ := h.st.GetAccount(ctx, "A"); acct.Paused {
+		t.Error("account still paused after logout")
+	}
+	if st, err := h.m.Start(ctx, "A", nil); err != nil || st != StatusQRPending {
+		t.Errorf("Start after logout = %s, %v; want a fresh QR flow", st, err)
 	}
 }
 

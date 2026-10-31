@@ -186,7 +186,15 @@ func (m *Manager) Start(ctx context.Context, sessionID string, proxy *string) (s
 func (m *Manager) start(ctx context.Context, id string, proxy *string, interactive bool) (string, error) {
 	if s := m.session(id); s != nil {
 		if s.live() {
-			return s.Status(), nil
+			status := s.Status()
+			if status == StatusConnected {
+				// Frappe may have missed or overridden the Active push
+				// (e.g. a resume racing it); repeat it.
+				if err := m.enqueue(ctx, outbox.MethodQR, qrPayload{SessionID: id, Status: frappeActive}); err != nil {
+					m.log.Error("enqueue callback", "session_id", id, "method", outbox.MethodQR, "error", err)
+				}
+			}
+			return status, nil
 		}
 		m.retire(s)
 	}
@@ -302,21 +310,21 @@ func (m *Manager) Pause(ctx context.Context, sessionID string) error {
 	return nil
 }
 
-// Resume clears the pause and connects.
-func (m *Manager) Resume(ctx context.Context, sessionID string, proxy *string) error {
+// Resume clears the pause and connects, returning the session status.
+func (m *Manager) Resume(ctx context.Context, sessionID string, proxy *string) (string, error) {
 	unlock := m.lockID(sessionID)
 	defer unlock()
 	if err := m.requireAccount(ctx, sessionID); err != nil {
-		return err
+		return "", err
 	}
 	if err := m.st.SetAccountPaused(ctx, sessionID, false); err != nil {
-		return err
+		return "", err
 	}
-	_, err := m.start(ctx, sessionID, proxy, true)
-	return err
+	return m.start(ctx, sessionID, proxy, true)
 }
 
-// Logout unlinks the device, deletes its store and clears the account's JID.
+// Logout unlinks the device, deletes its store and clears the account's JID
+// and pause.
 // If WhatsApp can't be reached the local device data is still removed.
 func (m *Manager) Logout(ctx context.Context, sessionID string) error {
 	unlock := m.lockID(sessionID)
@@ -340,6 +348,10 @@ func (m *Manager) Logout(ctx context.Context, sessionID string) error {
 		return err
 	}
 	if err := m.st.SetAccountJID(ctx, sessionID, ""); err != nil {
+		return err
+	}
+	// A logged-out account starts over: a pause from before must not block re-pairing.
+	if err := m.st.SetAccountPaused(ctx, sessionID, false); err != nil {
 		return err
 	}
 	m.setInactive(sessionID, StatusLoggedOut, types.EmptyJID)

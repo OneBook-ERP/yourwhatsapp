@@ -43,11 +43,51 @@ class TestWhatsAppAccount(IntegrationTestCase):
 		self.assertEqual(kwargs["json"], {"proxy": "socks5://proxy.test:1080"})
 		self.assertEqual(kwargs["headers"], {"x-api-key": RELAY_KEY})
 
-	def test_connect_sends_null_proxy_when_unset(self):
+	def test_cleared_proxy_sent_as_empty_string(self):
+		# null means "keep the relay's copy"; "" clears it.
 		self.account.proxy = ""
 		with patch("requests.post", return_value=relay_response()) as post:
 			self.account.connect()
-		self.assertEqual(post.call_args.kwargs["json"], {"proxy": None})
+			self.assertEqual(post.call_args.kwargs["json"], {"proxy": ""})
+			self.account.resume()
+			self.assertEqual(post.call_args.kwargs["json"], {"proxy": ""})
+			post.return_value = relay_response(body={"code": "ABCD-1234"})
+			self.account.pair_with_code()
+			self.assertEqual(post.call_args.kwargs["json"], {"phone": "+1 555 000 1111", "proxy": ""})
+
+	def _account_row(self):
+		return frappe.db.get_value(
+			"WhatsApp Account", self.account.name, ["status", "connected_at"], as_dict=True
+		)
+
+	def test_connect_already_connected_sets_active(self):
+		self.account.db_set("status", "Disconnected")
+		with patch("requests.post", return_value=relay_response(body={"status": "connected"})):
+			self.account.connect()
+		row = self._account_row()
+		self.assertEqual(row.status, "Active")
+		self.assertIsNotNone(row.connected_at)
+
+	def test_connect_connected_keeps_paused(self):
+		self.account.db_set("status", "Paused")
+		with patch("requests.post", return_value=relay_response(body={"status": "connected"})):
+			self.account.connect()
+		self.assertEqual(self._account_row().status, "Paused")
+
+	def test_connect_paused_on_relay_throws(self):
+		self.account.db_set("status", "Disconnected")
+		with patch("requests.post", return_value=relay_response(body={"status": "paused"})):
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				self.account.connect()
+		self.assertIn("Account is paused on the relay; use Resume", str(ctx.exception))
+
+	def test_resume_already_connected_sets_active(self):
+		self.account.db_set("status", "Paused")
+		with patch("requests.post", return_value=relay_response(body={"ok": True, "status": "connected"})):
+			self.account.resume()
+		row = self._account_row()
+		self.assertEqual(row.status, "Active")
+		self.assertIsNotNone(row.connected_at)
 
 	def test_pair_with_code_requires_phone(self):
 		self.account.phone_number = ""
