@@ -47,6 +47,7 @@ docker compose -f compose.yaml -f overrides/compose.mariadb.yaml -f overrides/co
 - No ports are published. Only containers on the compose network (your Frappe services) reach the relay. Never expose port 8800 to the internet: with the key, anyone can send messages as your numbers.
 - `stop_grace_period: 30s` lets the relay close WhatsApp sessions cleanly. Do not shorten it, and avoid `docker kill` on a live relay: repeated abrupt disconnects can get a device unlinked.
 - Run exactly one relay per data volume.
+- The relay runs as uid 65532 (distroless nonroot). A fresh named volume inherits the right ownership from the image; a bind mount or a pre-existing volume needs a host-side `chown -R 65532:65532 <path>` or the relay cannot open `relay.db` and crashes on start.
 
 ## 4. WhatsApp Settings
 
@@ -64,6 +65,8 @@ Migrating from the old Node relay: every account must be relinked once, because 
 ## 6. Back up the data volume
 
 The `whatsapp-relay-data` volume holds `relay.db`: device keys for every linked number, plus the pending callback queue. If it is lost, every number must be relinked. If it leaks, whoever has it can act as your numbers: encrypt backups and restrict access like credentials.
+
+The volume name is prefixed with the compose project name; find it with `docker volume ls`.
 
 ```bash
 docker compose stop whatsapp-relay   # consistent snapshot; SQLite runs in WAL mode
