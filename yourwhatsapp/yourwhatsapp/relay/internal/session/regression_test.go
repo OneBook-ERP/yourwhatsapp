@@ -96,6 +96,7 @@ func TestStartDuringShutdownDoesNotLeak(t *testing.T) {
 func TestRestoreEnqueueFailureKeepsRemainingQueued(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
+	_, fire := captureAfterFunc(h)
 	for _, id := range []string{"m1", "m2"} {
 		if _, err := h.st.ReserveSend(ctx, id, "A"); err != nil {
 			t.Fatal(err)
@@ -107,9 +108,11 @@ func TestRestoreEnqueueFailureKeepsRemainingQueued(t *testing.T) {
 		}
 		return nil
 	}
-	if err := h.m.RestoreAll(ctx); !errors.Is(err, errFake) {
-		t.Fatalf("RestoreAll = %v, want enqueue error", err)
+	if err := h.m.RestoreAll(ctx); err != nil {
+		t.Fatal(err)
 	}
+	h.m.FailLostSendsAfter(time.Second)
+	fire()
 	if rec := h.sendRow("m1"); rec.State != store.SendFailed {
 		t.Errorf("m1 = %+v, want failed (callback enqueued)", rec)
 	}
@@ -117,10 +120,13 @@ func TestRestoreEnqueueFailureKeepsRemainingQueued(t *testing.T) {
 		t.Errorf("m2 = %+v, want still queued for the next boot", rec)
 	}
 
+	// Next boot.
 	h.enqueueErr = nil
 	if err := h.m.RestoreAll(ctx); err != nil {
 		t.Fatal(err)
 	}
+	h.m.FailLostSendsAfter(time.Second)
+	fire()
 	cbs := h.callbacks(outbox.MethodStatus)
 	if len(cbs) != 2 || cbs[1]["local_message_id"] != "m2" {
 		t.Errorf("callbacks = %v", cbs)

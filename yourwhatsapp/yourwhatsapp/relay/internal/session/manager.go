@@ -83,6 +83,10 @@ type Manager struct {
 	sessions map[string]*Session
 	idLocks  map[string]*sync.Mutex
 	closed   bool
+	// lostSends are the sends still queued from the previous process,
+	// found by RestoreAll and reported Failed by FailLostSendsAfter.
+	lostSends     []store.SendRecord
+	stopLostSends func() bool
 }
 
 var deviceIdentityOnce sync.Once
@@ -130,12 +134,16 @@ func (m *Manager) session(id string) *Session {
 	return m.sessions[id]
 }
 
-// RestoreAll fails sends lost with the previous process, then connects every
-// paired, unpaused account.
+// RestoreAll records the sends lost with the previous process (see
+// FailLostSendsAfter), then connects every paired, unpaused account.
 func (m *Manager) RestoreAll(ctx context.Context) error {
-	if err := m.failLostSends(ctx); err != nil {
-		return err
+	lost, err := m.st.ListQueued(ctx)
+	if err != nil {
+		return fmt.Errorf("list queued sends: %w", err)
 	}
+	m.mu.Lock()
+	m.lostSends = lost
+	m.mu.Unlock()
 	accounts, err := m.st.ListRestorable(ctx)
 	if err != nil {
 		return fmt.Errorf("list restorable accounts: %w", err)
@@ -151,15 +159,31 @@ func (m *Manager) RestoreAll(ctx context.Context) error {
 	return nil
 }
 
-// failLostSends reports every send still queued from the previous process as
-// Failed. Each row is marked failed only after its callback is in the outbox,
-// so an error leaves the remaining rows queued for the next boot.
+// FailLostSendsAfter reports the sends RestoreAll found as Failed once grace
+// has passed. Call it once the HTTP server is listening: Frappe fails each
+// one over at once, so the restored sessions need time to reconnect first.
+func (m *Manager) FailLostSendsAfter(grace time.Duration) {
+	stop := m.afterFunc(grace, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := m.failLostSends(ctx); err != nil {
+			m.log.Error("report lost sends; the rest stay queued for the next boot", "error", err)
+		}
+	})
+	m.mu.Lock()
+	m.stopLostSends = stop
+	m.mu.Unlock()
+}
+
+// failLostSends reports every lost send as Failed. Each row is marked failed
+// only after its callback is in the outbox, so an error leaves the remaining
+// rows queued for the next boot.
 func (m *Manager) failLostSends(ctx context.Context) error {
-	queued, err := m.st.ListQueued(ctx)
-	if err != nil {
-		return fmt.Errorf("list queued sends: %w", err)
-	}
-	for _, r := range queued {
+	m.mu.Lock()
+	lost := m.lostSends
+	m.lostSends = nil
+	m.mu.Unlock()
+	for _, r := range lost {
 		if err := m.enqueue(ctx, outbox.MethodStatus, statusPayload{
 			LocalMessageID: r.LocalID, Status: "Failed", ErrorCode: store.ErrCodeSendFailed,
 			ErrorReason: "relay restarted before the message was sent",
@@ -482,6 +506,9 @@ func onlyDigits(s string) string {
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
 	m.closed = true
+	if m.stopLostSends != nil {
+		m.stopLostSends() // not yet reported: they stay queued for the next boot
+	}
 	sessions := make([]*Session, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		sessions = append(sessions, s)

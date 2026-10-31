@@ -24,6 +24,9 @@ import (
 const (
 	httpShutdownTimeout    = 10 * time.Second
 	sessionShutdownTimeout = 15 * time.Second
+	// lostSendGrace gives restored sessions time to reconnect before the
+	// sends lost in the restart are failed over.
+	lostSendGrace = 30 * time.Second
 )
 
 func main() {
@@ -76,9 +79,15 @@ func run(log *slog.Logger) error {
 		Handler:           api.NewHandler(manager, st, cfg.APIKey, log),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		shutdown(log, srv, manager, cancelWorker, workerDone)
+		return fmt.Errorf("listen: %w", err)
+	}
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.ListenAndServe() }()
+	go func() { serveErr <- srv.Serve(ln) }()
 	log.Info("relay listening", "addr", srv.Addr)
+	manager.FailLostSendsAfter(lostSendGrace)
 
 	select {
 	case err := <-serveErr:

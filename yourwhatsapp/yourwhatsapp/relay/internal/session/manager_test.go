@@ -114,17 +114,50 @@ func TestPairCodeRejectsPairedSession(t *testing.T) {
 	}
 }
 
-func TestRestoreFailsQueued(t *testing.T) {
+// captureAfterFunc replaces the manager's timer with one the test fires.
+func captureAfterFunc(h *harness) (delay *time.Duration, fire func()) {
+	var d time.Duration
+	var f func()
+	h.m.afterFunc = func(wait time.Duration, fn func()) func() bool {
+		d, f = wait, fn
+		return func() bool { return true }
+	}
+	return &d, func() { f() }
+}
+
+// Sends lost with the previous process are reported Failed only after the
+// grace period, so restored sessions are back up when Frappe fails over;
+// sends accepted after boot are not touched.
+func TestRestoreFailsQueuedAfterGrace(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
+	delay, fire := captureAfterFunc(h)
 	if _, err := h.st.ReserveSend(ctx, "m1", "A"); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.m.RestoreAll(ctx); err != nil {
 		t.Fatal(err)
 	}
+	h.m.FailLostSendsAfter(30 * time.Second)
+	if *delay != 30*time.Second {
+		t.Errorf("grace = %v", *delay)
+	}
+	if cbs := h.callbacks(outbox.MethodStatus); len(cbs) != 0 {
+		t.Fatalf("callbacks before grace = %v", cbs)
+	}
+	if rec := h.sendRow("m1"); rec.State != store.SendQueued {
+		t.Fatalf("row before grace = %+v", rec)
+	}
+	if _, err := h.st.ReserveSend(ctx, "m2", "A"); err != nil { // accepted after boot
+		t.Fatal(err)
+	}
+
+	fire()
 	if rec := h.sendRow("m1"); rec.State != store.SendFailed || rec.ErrorCode != store.ErrCodeSendFailed {
-		t.Errorf("row = %+v", rec)
+		t.Errorf("m1 = %+v", rec)
+	}
+	if rec := h.sendRow("m2"); rec.State != store.SendQueued {
+		t.Errorf("m2 = %+v, want untouched", rec)
 	}
 	cbs := h.callbacks(outbox.MethodStatus)
 	if len(cbs) != 1 || cbs[0]["local_message_id"] != "m1" || cbs[0]["status"] != "Failed" || cbs[0]["error_code"] != "send_failed" {
