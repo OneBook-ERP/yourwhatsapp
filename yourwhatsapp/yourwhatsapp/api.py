@@ -1,11 +1,19 @@
+import hmac
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 import frappe
-from frappe.utils import now_datetime
+from frappe.utils import get_datetime, get_system_timezone, now_datetime
+
+STATUS_RANK = {"Queued": 0, "Sent": 1, "Delivered": 2, "Read": 3}
+FAILOVER_ERROR_CODES = {"session_unavailable", "send_failed", "temp_banned"}
+FAILOVER_METHOD = "yourwhatsapp.yourwhatsapp.relay_client.handle_async_failure"
 
 
 def _verify_relay_key():
 	expected = frappe.get_single("WhatsApp Settings").get_password("relay_api_key")
 	provided = frappe.get_request_header("X-Api-Key")
-	if not expected or not provided or provided != expected:
+	if not expected or not provided or not hmac.compare_digest(provided.encode(), expected.encode()):
 		frappe.throw("Invalid relay API key", frappe.PermissionError)
 
 
@@ -22,12 +30,20 @@ def inbound_message(
 	media_base64: str | None = None,
 	media_mimetype: str | None = None,
 	media_filename: str | None = None,
+	from_lid: bool = False,
 ):
 	_verify_relay_key()
 
 	account = frappe.db.get_value("WhatsApp Account", {"session_id": session_id}, "name")
 	if not account:
 		frappe.throw(f"No WhatsApp Account found for session {session_id}", frappe.DoesNotExistError)
+
+	if message_id:
+		# The relay's outbox retries until it sees a 2xx, so a redelivery of an
+		# inbound callback must not create a second message.
+		existing = frappe.db.get_value("WhatsApp Message", {"message_id": message_id, "type": "Incoming"})
+		if existing:
+			return {"name": existing}
 
 	doc = frappe.get_doc(
 		{
@@ -41,6 +57,7 @@ def inbound_message(
 			"attach": attach_url,
 			"is_reply": is_reply,
 			"reply_to_message_id": reply_to_message_id,
+			"is_lid_sender": 1 if frappe.utils.cint(from_lid) else 0,
 		}
 	)
 	doc.insert(ignore_permissions=True)
@@ -78,19 +95,90 @@ def _save_inbound_media(message_name: str, media_base64: str, mimetype: str | No
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
-def message_status(message_id: str, status: str, error_reason: str | None = None):
+def message_status(
+	status: str,
+	message_id: str | None = None,
+	error_reason: str | None = None,
+	local_message_id: str | None = None,
+	error_code: str | None = None,
+):
 	_verify_relay_key()
 
-	name = frappe.db.get_value("WhatsApp Message", {"message_id": message_id}, "name")
+	name = _find_message(message_id, local_message_id)
 	if not name:
 		# Expected, not an error: WhatsApp acks every outgoing message on the
 		# linked number, including ones typed on the phone that CRM never sent.
 		return {"ok": False, "reason": "unknown message_id"}
 
-	frappe.db.set_value("WhatsApp Message", name, "status", status)
-	if error_reason:
-		frappe.db.set_value("WhatsApp Message", name, "error_reason", error_reason)
+	current = frappe.db.get_value("WhatsApp Message", name, "status")
+	if status == "Failed":
+		return _apply_failure(name, current, error_reason, error_code)
+
+	if status not in STATUS_RANK:
+		return {"ok": False, "reason": "unknown status"}
+	# Receipts can arrive out of order; never move a message backwards.
+	if STATUS_RANK[status] < STATUS_RANK.get(current, -1):
+		return {"ok": False, "reason": "stale status"}
+
+	values = {"status": status}
+	if status == "Sent" and message_id:
+		values["message_id"] = message_id
+	frappe.db.set_value("WhatsApp Message", name, values)
 	return {"ok": True}
+
+
+def _find_message(message_id: str | None, local_message_id: str | None) -> str | None:
+	if local_message_id:
+		return frappe.db.exists("WhatsApp Message", local_message_id)
+	if message_id:
+		return frappe.db.get_value("WhatsApp Message", {"message_id": message_id}, "name")
+	return None
+
+
+def _apply_failure(name: str, current: str | None, error_reason: str | None, error_code: str | None):
+	# Only a message still waiting on the relay can fail; once it was Sent (or a
+	# failure was already handled) a late Failed callback is noise.
+	if current != "Queued":
+		return {"ok": False, "reason": "not failable"}
+
+	values = {"status": "Failed"}
+	if error_reason:
+		values["error_reason"] = error_reason
+	frappe.db.set_value("WhatsApp Message", name, values)
+
+	if error_code in FAILOVER_ERROR_CODES:
+		if error_code == "temp_banned":
+			account = frappe.db.get_value("WhatsApp Message", name, "whatsapp_account")
+			if account:
+				frappe.db.set_value("WhatsApp Account", account, "status", "RateLimited")
+		frappe.enqueue(FAILOVER_METHOD, message_name=name, error_code=error_code, enqueue_after_commit=True)
+	return {"ok": True}
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
+def account_event(session_id: str, event: str, until: str | None = None):
+	_verify_relay_key()
+
+	account = frappe.db.get_value("WhatsApp Account", {"session_id": session_id}, "name")
+	if not account:
+		frappe.throw(f"No WhatsApp Account found for session {session_id}", frappe.DoesNotExistError)
+
+	if event != "temp_banned":
+		return {"ok": False, "reason": "unknown event"}
+
+	values = {"status": "RateLimited"}
+	if until:
+		values["rate_limited_until"] = _to_system_datetime(until)
+	frappe.db.set_value("WhatsApp Account", account, values)
+	return {"ok": True}
+
+
+def _to_system_datetime(rfc3339: str) -> datetime:
+	"""RFC3339 from the relay -> naive datetime in the system timezone, as Datetime fields expect."""
+	parsed = datetime.fromisoformat(rfc3339.replace("Z", "+00:00"))
+	if parsed.tzinfo is None:
+		return parsed
+	return parsed.astimezone(ZoneInfo(get_system_timezone())).replace(tzinfo=None)
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
@@ -101,10 +189,11 @@ def update_qr(session_id: str, qr_base64: str | None = None, status: str | None 
 	if not account:
 		frappe.throw(f"No WhatsApp Account found for session {session_id}", frappe.DoesNotExistError)
 
-	if status:
+	if status and _relay_may_set_status(account, status):
 		frappe.db.set_value("WhatsApp Account", account, "status", status)
 		if status == "Active":
 			frappe.db.set_value("WhatsApp Account", account, "connected_at", now_datetime())
+			frappe.db.set_value("WhatsApp Account", account, "rate_limited_until", None)
 			# A scanned QR is spent, and a leftover one is only a liability.
 			_delete_qr_image(account)
 			frappe.db.set_value("WhatsApp Account", account, "qr_code", None)
@@ -113,6 +202,17 @@ def update_qr(session_id: str, qr_base64: str | None = None, status: str | None 
 		_save_qr_image(account, qr_base64)
 
 	return {"ok": True}
+
+
+def _relay_may_set_status(account: str, status: str) -> bool:
+	"""Frappe owns admin intent (Paused, manual RateLimited); the relay owns connection facts."""
+	current, until = frappe.db.get_value("WhatsApp Account", account, ["status", "rate_limited_until"])
+	if current == "Paused" and status in ("Active", "Disconnected"):
+		return False
+	if current == "RateLimited" and status == "Active":
+		# Only a relay-originated ban (has an expiry) lifts itself, once it has passed.
+		return bool(until) and get_datetime(until) <= now_datetime()
+	return True
 
 
 def qr_file_name(account: str) -> str:

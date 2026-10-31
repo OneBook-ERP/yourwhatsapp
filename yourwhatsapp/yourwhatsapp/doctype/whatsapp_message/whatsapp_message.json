@@ -145,6 +145,21 @@
             "depends_on": "eval:doc.status=='Failed'"
         },
         {
+            "fieldname": "is_lid_sender",
+            "fieldtype": "Check",
+            "label": "Unresolved Sender (LID)",
+            "description": "The sender's phone number could not be resolved; the number shown is a WhatsApp LID.",
+            "read_only": 1,
+            "default": "0"
+        },
+        {
+            "fieldname": "attempted_accounts",
+            "fieldtype": "Small Text",
+            "label": "Attempted Accounts",
+            "hidden": 1,
+            "read_only": 1
+        },
+        {
             "fieldname": "section_break_reference",
             "fieldtype": "Section Break"
         },

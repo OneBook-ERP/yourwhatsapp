@@ -101,6 +101,18 @@
             "read_only": 1
         },
         {
+            "fieldname": "pairing_method",
+            "fieldtype": "Select",
+            "label": "Pairing Method",
+            "options": "QR Code\nPhone Number",
+            "default": "QR Code"
+        },
+        {
+            "fieldname": "proxy",
+            "fieldtype": "Data",
+            "label": "Proxy"
+        },
+        {
             "fieldname": "column_break_health",
             "fieldtype": "Column Break"
         },
@@ -108,6 +120,12 @@
             "fieldname": "connected_at",
             "fieldtype": "Datetime",
             "label": "Connected At",
+            "read_only": 1
+        },
+        {
+            "fieldname": "rate_limited_until",
+            "fieldtype": "Datetime",
+            "label": "Rate Limited Until",
             "read_only": 1
         },
         {
