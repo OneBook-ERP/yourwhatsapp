@@ -51,16 +51,45 @@ func (s *Store) ReserveSend(ctx context.Context, localID, sessionID string) (*Se
 	return nil, tx.Commit()
 }
 
-func (s *Store) MarkSent(ctx context.Context, localID, messageID string) error {
-	_, err := s.DB.ExecContext(ctx, `UPDATE sends SET state = 'sent', message_id = ?, error_code = NULL,
-		updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE local_message_id = ?`, messageID, localID)
-	return err
+// GetSend returns the send record for localID, or nil when there is none.
+func (s *Store) GetSend(ctx context.Context, localID string) (*SendRecord, error) {
+	var rec SendRecord
+	err := s.DB.QueryRowContext(ctx, `SELECT `+sendColumns+` FROM sends WHERE local_message_id = ?`, localID).
+		Scan(&rec.LocalID, &rec.SessionID, &rec.State, &rec.MessageID, &rec.ErrorCode)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &rec, nil
 }
 
-func (s *Store) MarkFailed(ctx context.Context, localID, code string) error {
-	_, err := s.DB.ExecContext(ctx, `UPDATE sends SET state = 'failed', error_code = ?,
-		updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE local_message_id = ?`, code, localID)
-	return err
+// MarkSent records a successful send. It only touches the row while it is
+// still queued for sessionID, so a late result from a session that lost the
+// reservation cannot overwrite another session's claim. It reports whether a
+// row was updated.
+func (s *Store) MarkSent(ctx context.Context, localID, sessionID, messageID string) (bool, error) {
+	res, err := s.DB.ExecContext(ctx, `UPDATE sends SET state = 'sent', message_id = ?, error_code = NULL,
+		updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		WHERE local_message_id = ? AND session_id = ? AND state = 'queued'`, messageID, localID, sessionID)
+	return affected(res, err)
+}
+
+// MarkFailed records a failed send, with the same guard as MarkSent.
+func (s *Store) MarkFailed(ctx context.Context, localID, sessionID, code string) (bool, error) {
+	res, err := s.DB.ExecContext(ctx, `UPDATE sends SET state = 'failed', error_code = ?,
+		updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+		WHERE local_message_id = ? AND session_id = ? AND state = 'queued'`, code, localID, sessionID)
+	return affected(res, err)
+}
+
+func affected(res sql.Result, err error) (bool, error) {
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // FailQueued marks every queued row failed/send_failed (boot recovery: queued
