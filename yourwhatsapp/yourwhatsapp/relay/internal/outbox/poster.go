@@ -21,14 +21,18 @@ type Poster interface {
 	Post(ctx context.Context, method string, payload []byte) (status int, err error)
 }
 
+// TargetFunc returns where callbacks go: Frappe's base URL, the site name sent
+// as Host (empty: the URL's host) and the API key.
+type TargetFunc func() (baseURL, siteName, apiKey string)
+
 type frappePoster struct {
-	client   *http.Client
-	baseURL  string
-	siteName string
-	apiKey   string
+	client *http.Client
+	target TargetFunc
 }
 
-func NewFrappePoster(baseURL, siteName, apiKey string) Poster {
+// NewFrappePoster reads target on every post, so a new claim or key applies
+// to the next callback.
+func NewFrappePoster(target TargetFunc) Poster {
 	return &frappePoster{
 		client: &http.Client{
 			Timeout: 30 * time.Second,
@@ -36,22 +40,21 @@ func NewFrappePoster(baseURL, siteName, apiKey string) Poster {
 			// must not turn a POST into a GET that "succeeds" with 200.
 			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		},
-		baseURL:  strings.TrimRight(baseURL, "/"),
-		siteName: siteName,
-		apiKey:   apiKey,
+		target: target,
 	}
 }
 
 func (p *frappePoster) Post(ctx context.Context, method string, payload []byte) (int, error) {
-	url := p.baseURL + "/api/method/yourwhatsapp.yourwhatsapp.api." + method
+	baseURL, siteName, apiKey := p.target()
+	url := strings.TrimRight(baseURL, "/") + "/api/method/yourwhatsapp.yourwhatsapp.api." + method
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
 	if err != nil {
 		return 0, err
 	}
-	req.Header.Set("X-Api-Key", p.apiKey)
+	req.Header.Set("X-Api-Key", apiKey)
 	req.Header.Set("Content-Type", "application/json")
-	if p.siteName != "" {
-		req.Host = p.siteName
+	if siteName != "" {
+		req.Host = siteName
 	}
 	resp, err := p.client.Do(req)
 	if err != nil {

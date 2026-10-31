@@ -53,6 +53,13 @@ CREATE TABLE IF NOT EXISTS outbox_dead (
 	created_at TEXT NOT NULL,
 	dead_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now'))
 );
+CREATE TABLE IF NOT EXISTS relay_config (
+	id INTEGER PRIMARY KEY CHECK(id=1),
+	api_key TEXT NOT NULL,
+	callback_url TEXT NOT NULL,
+	site_name TEXT NOT NULL,
+	claimed_at TEXT NOT NULL
+);
 `
 
 // Open creates dataDir, opens relay.db, applies whatsmeow's migrations, then our tables.

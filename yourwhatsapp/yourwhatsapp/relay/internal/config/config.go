@@ -10,7 +10,11 @@ import (
 )
 
 type Config struct {
-	APIKey         string
+	// APIKey, when set, pins the relay's identity to env (mode "env"); when
+	// empty the relay uses its stored claim or waits for POST /claim.
+	APIKey string
+	// BootstrapToken, when set, must accompany POST /claim.
+	BootstrapToken string
 	FrappeBaseURL  string
 	FrappeSiteName string
 	Host           string
@@ -25,15 +29,12 @@ type Config struct {
 func Load() (Config, error) {
 	c := Config{
 		APIKey:         os.Getenv("RELAY_API_KEY"),
+		BootstrapToken: os.Getenv("RELAY_BOOTSTRAP_TOKEN"),
 		FrappeBaseURL:  envOr("FRAPPE_BASE_URL", "http://127.0.0.1:8001"),
 		FrappeSiteName: os.Getenv("FRAPPE_SITE_NAME"),
 		Host:           envOr("RELAY_HOST", "127.0.0.1"),
 		DataDir:        envOr("RELAY_DATA_DIR", "./data"),
 	}
-	if c.APIKey == "" {
-		return Config{}, errors.New("RELAY_API_KEY is required")
-	}
-
 	port, err := strconv.Atoi(envOr("RELAY_PORT", "8800"))
 	if err != nil {
 		return Config{}, fmt.Errorf("RELAY_PORT: %w", err)

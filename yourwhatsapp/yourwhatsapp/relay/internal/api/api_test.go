@@ -9,7 +9,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"yourwhatsapp/relay/internal/claim"
+	"yourwhatsapp/relay/internal/config"
 	"yourwhatsapp/relay/internal/phone"
 	"yourwhatsapp/relay/internal/session"
 	"yourwhatsapp/relay/internal/store"
@@ -45,14 +48,25 @@ func (f *fakeManager) Send(_ context.Context, req session.SendRequest) *session.
 	return f.sendErr
 }
 
+// newServer serves an env-mode relay keyed with testKey.
 func newServer(t *testing.T, fm *fakeManager) (http.Handler, *store.Store) {
+	t.Helper()
+	h, st, _ := newServerWith(t, fm, config.Config{APIKey: testKey})
+	return h, st
+}
+
+func newServerWith(t *testing.T, fm *fakeManager, cfg config.Config) (http.Handler, *store.Store, *claim.State) {
 	t.Helper()
 	st, err := store.Open(context.Background(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	return NewHandler(fm, st, testKey, slog.New(slog.NewJSONHandler(io.Discard, nil))), st
+	cs, err := claim.New(st, cfg, time.Now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewHandler(fm, st, cs, slog.New(slog.NewJSONHandler(io.Discard, nil))), st, cs
 }
 
 func do(h http.Handler, method, path, body string, auth bool) *httptest.ResponseRecorder {
@@ -242,4 +256,12 @@ func TestDeadList(t *testing.T) {
 	if len(list) != 1 || list[0]["method"] != "m" || list[0]["last_error"] != "boom" {
 		t.Fatalf("list: %v", list)
 	}
+}
+
+func doWithKey(h http.Handler, method, path, key string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, nil)
+	req.Header.Set("x-api-key", key)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
 }

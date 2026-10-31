@@ -3,7 +3,6 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
@@ -11,6 +10,7 @@ import (
 	"net/http"
 	"time"
 
+	"yourwhatsapp/relay/internal/claim"
 	"yourwhatsapp/relay/internal/phone"
 	"yourwhatsapp/relay/internal/session"
 	"yourwhatsapp/relay/internal/store"
@@ -33,19 +33,21 @@ type Manager interface {
 }
 
 type handler struct {
-	m      Manager
-	st     *store.Store
-	apiKey []byte
-	log    *slog.Logger
+	m   Manager
+	st  *store.Store
+	cs  *claim.State
+	log *slog.Logger
 }
 
-// NewHandler returns the relay's HTTP handler. Every route but /health needs x-api-key.
-func NewHandler(m Manager, st *store.Store, apiKey string, log *slog.Logger) http.Handler {
-	h := &handler{m: m, st: st, apiKey: []byte(apiKey), log: log}
+// NewHandler returns the relay's HTTP handler. Every route but /health and
+// /claim needs x-api-key, and answers 503 unclaimed until the relay is claimed.
+func NewHandler(m Manager, st *store.Store, cs *claim.State, log *slog.Logger) http.Handler {
+	h := &handler{m: m, st: st, cs: cs, log: log}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
+	mux.HandleFunc("POST /claim", h.claim)
 	mux.Handle("POST /session/{id}/start", h.auth(h.start))
 	mux.Handle("POST /session/{id}/pair-code", h.auth(h.pairCode))
 	mux.Handle("GET /session/{id}/status", h.auth(h.status))
@@ -59,13 +61,45 @@ func NewHandler(m Manager, st *store.Store, apiKey string, log *slog.Logger) htt
 
 func (h *handler) auth(next http.HandlerFunc) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		got := []byte(r.Header.Get("x-api-key"))
-		if subtle.ConstantTimeCompare(got, h.apiKey) != 1 {
+		if h.cs.Mode() == claim.ModeUnclaimed {
+			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "unclaimed"})
+			return
+		}
+		if !h.cs.Authorized(r.Header.Get("x-api-key")) {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid api key"})
 			return
 		}
 		next(w, r)
 	})
+}
+
+type claimBody struct {
+	APIKey         string `json:"api_key"`
+	CallbackURL    string `json:"callback_url"`
+	SiteName       string `json:"site_name"`
+	BootstrapToken string `json:"bootstrap_token"`
+}
+
+func (h *handler) claim(w http.ResponseWriter, r *http.Request) {
+	var b claimBody
+	if !decodeBody(w, r, &b, false) {
+		return
+	}
+	err := h.cs.Claim(r.Context(), b.APIKey, b.CallbackURL, b.SiteName, b.BootstrapToken)
+	switch {
+	case err == nil:
+		h.log.Info("relay claimed", "callback_url", b.CallbackURL, "site_name", b.SiteName)
+		writeJSON(w, http.StatusOK, map[string]any{"claimed": true})
+	case errors.Is(err, claim.ErrAlreadyClaimed):
+		writeError(w, http.StatusConflict, "already_claimed", err.Error())
+	case errors.Is(err, claim.ErrBadBootstrapToken):
+		h.log.Warn("claim rejected: bad bootstrap token")
+		writeError(w, http.StatusUnauthorized, "bad_bootstrap_token", err.Error())
+	case errors.Is(err, claim.ErrBadRequest):
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+	default:
+		h.fail(w, r, err)
+	}
 }
 
 type proxyBody struct {

@@ -7,7 +7,7 @@ import (
 
 func clearEnv(t *testing.T) {
 	t.Helper()
-	for _, k := range []string{"RELAY_API_KEY", "FRAPPE_BASE_URL", "FRAPPE_SITE_NAME", "RELAY_HOST", "RELAY_PORT", "RELAY_DATA_DIR", "SEND_DELAY_MIN", "SEND_DELAY_MAX", "MEDIA_MAX_BYTES"} {
+	for _, k := range []string{"RELAY_API_KEY", "FRAPPE_BASE_URL", "FRAPPE_SITE_NAME", "RELAY_HOST", "RELAY_PORT", "RELAY_DATA_DIR", "SEND_DELAY_MIN", "SEND_DELAY_MAX", "MEDIA_MAX_BYTES", "RELAY_BOOTSTRAP_TOKEN"} {
 		t.Setenv(k, "")
 	}
 }
@@ -33,10 +33,11 @@ func TestLoadDefaults(t *testing.T) {
 	}
 }
 
-func TestLoadRequiresKey(t *testing.T) {
+// Without RELAY_API_KEY the relay starts and waits to be claimed.
+func TestLoadKeyOptional(t *testing.T) {
 	clearEnv(t)
-	if _, err := Load(); err == nil {
-		t.Fatal("expected error for missing key")
+	if c, err := Load(); err != nil || c.APIKey != "" {
+		t.Fatalf("Load without key = %+v, %v", c, err)
 	}
 }
 
@@ -62,5 +63,13 @@ func TestLoadMediaMaxBytes(t *testing.T) {
 		if _, err := Load(); err == nil {
 			t.Errorf("MEDIA_MAX_BYTES=%q: expected error", bad)
 		}
+	}
+}
+
+func TestLoadBootstrapToken(t *testing.T) {
+	clearEnv(t)
+	t.Setenv("RELAY_BOOTSTRAP_TOKEN", "boot")
+	if c, err := Load(); err != nil || c.BootstrapToken != "boot" {
+		t.Fatalf("BootstrapToken = %q, %v", c.BootstrapToken, err)
 	}
 }
