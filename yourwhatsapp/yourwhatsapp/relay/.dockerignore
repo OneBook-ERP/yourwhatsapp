@@ -1,0 +1,6 @@
+node_modules
+.sessions
+bin
+data
+*.js
+package*.json

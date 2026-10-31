@@ -150,6 +150,7 @@ app_license = "mit"
 # ---------------
 
 scheduler_events = {
+	"cron": {"*/5 * * * *": ["yourwhatsapp.yourwhatsapp.tasks.recover_rate_limited_accounts"]},
 	"daily": [
 		"yourwhatsapp.yourwhatsapp.tasks.reset_daily_message_counts"
 	],

@@ -1,0 +1,23 @@
+# Compose override that adds the WhatsApp relay next to a frappe_docker stack.
+# Use:  docker compose -f compose.yaml -f overrides/compose.mariadb.yaml ... -f compose.whatsapp.yaml up -d
+# See DEPLOYMENT.md. Never publish the relay port: only Frappe containers may reach it.
+services:
+  whatsapp-relay:
+    image: ghcr.io/<org>/yourwhatsapp-relay:<version>
+    # build:
+    #   context: ./apps/yourwhatsapp/yourwhatsapp/yourwhatsapp/relay
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      # Frappe's internal address as seen from this container (frappe_docker: the frontend service).
+      FRAPPE_BASE_URL: http://frontend:8080
+      # Site name, sent as the Host header so the callback reaches the right site.
+      FRAPPE_SITE_NAME: ${SITE_NAME:?set SITE_NAME}
+      # Must equal WhatsApp Settings.relay_api_key on the site.
+      RELAY_API_KEY: ${RELAY_API_KEY:?set RELAY_API_KEY}
+      RELAY_HOST: 0.0.0.0
+    volumes:
+      - whatsapp-relay-data:/data
+
+volumes:
+  whatsapp-relay-data:

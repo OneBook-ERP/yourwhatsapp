@@ -1,7 +1,8 @@
 from datetime import datetime
+from zoneinfo import ZoneInfo
 
 import frappe
-from frappe.utils import now_datetime
+from frappe.utils import get_system_timezone, now_datetime
 
 
 def get_eligible_accounts(exclude=None):
@@ -34,3 +35,21 @@ def pick_account(exclude=None):
 
 def pick_failover_account(failed_account):
 	return pick_account(exclude=[failed_account])
+
+
+def mark_rate_limited(account, until=None):
+	"""Flag an account RateLimited unless an admin has Paused it: Frappe owns admin intent."""
+	if frappe.db.get_value("WhatsApp Account", account, "status") == "Paused":
+		return
+	values = {"status": "RateLimited"}
+	if until:
+		values["rate_limited_until"] = until
+	frappe.db.set_value("WhatsApp Account", account, values)
+
+
+def to_system_datetime(rfc3339: str) -> datetime:
+	"""RFC3339 from the relay -> naive datetime in the system timezone, as Datetime fields expect."""
+	parsed = datetime.fromisoformat(rfc3339.replace("Z", "+00:00"))
+	if parsed.tzinfo is None:
+		return parsed
+	return parsed.astimezone(ZoneInfo(get_system_timezone())).replace(tzinfo=None)

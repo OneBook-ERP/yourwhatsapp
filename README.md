@@ -1,7 +1,8 @@
 ## Yourwhatsapp
 
 Self-hosted WhatsApp sending/receiving layer for Frappe CRM, backed by an unofficial
-client (`whatsapp-web.js`) behind a small Node relay. Built for a business whose category
+client behind a small self-hosted relay (a Go relay on `whatsmeow`, replacing the earlier
+Node/`whatsapp-web.js` one). Built for a business whose category
 is restricted under Meta's policy, so the official WhatsApp Business API isn't available.
 
 It supplies `WhatsApp Message`, `WhatsApp Account`, `WhatsApp Settings` and
@@ -19,8 +20,8 @@ tracked in `ROADMAP.md` reduces risk; it does not remove it. Don't describe it o
 Frappe CRM ──> crm.api.whatsapp.* ──> doctypes (this app) ──> relay_client.py
                                                                    │ HTTP + x-api-key
                                                                    ▼
-                                              Node relay (one whatsapp-web.js client
-                                              per WhatsApp Account) ──> WhatsApp
+                                              Go relay (one whatsmeow client per
+                                              WhatsApp Account) ──> WhatsApp
 ```
 
 Outgoing messages are routed across accounts (round robin or priority), respect a daily
@@ -30,7 +31,7 @@ receipts and QR codes come back through whitelisted endpoints in `api.py`.
 ### Requirements
 
 - Frappe v16 + Frappe CRM
-- Node 18+ and a Chromium binary for the relay
+- Go 1.27+ to build the relay (or use the Docker image); no browser needed
 - One or more real, SIM-registered WhatsApp numbers (not VOIP)
 
 ### Installation
@@ -41,13 +42,18 @@ bench get-app https://github.com/OneBook-ERP/yourwhatsapp --branch version-16
 bench --site $SITE install-app yourwhatsapp
 ```
 
-Then start the relay (see `yourwhatsapp/relay/README.md`), fill in **WhatsApp Settings**
+Then build and start the relay (`cd yourwhatsapp/yourwhatsapp/relay && make build`, env vars
+and routes in `yourwhatsapp/yourwhatsapp/relay/README.md`), fill in **WhatsApp Settings**
 (`relay_base_url`, `relay_api_key`), create a **WhatsApp Account** and click
 **Connect / Generate QR** to pair a number by scanning from WhatsApp → Linked Devices.
 
-For production deployment notes and the current blocker list, see `ROADMAP.md`
-(Phase 1.6). Production runs the relay as its own container; a setup guide and a
-UI-driven relay setup flow are still being built.
+### Production
+
+Production runs the relay as its own container next to the Frappe stack. See
+`DEPLOYMENT.md` for the image build, compose override, backups and warm-up advice. The
+relay keeps device keys in one SQLite file (`relay.db`): back it up. The Docker files are
+untested until the first real deploy. Remaining blockers are tracked in `ROADMAP.md`
+(Phase 1.6).
 
 ### Status
 

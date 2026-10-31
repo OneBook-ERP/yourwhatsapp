@@ -21,11 +21,33 @@ Frappe CRM (installed, unmodified) ──calls──> crm.api.whatsapp.*
                                           real WhatsApp (unofficial)
 ```
 
+**Relay engine migration (decided 2026-10-31):** the Node/whatsapp-web.js relay is being replaced by a Go relay on **whatsmeow** (direct multi-device websocket, no headless browser), keeping the same HTTP contract with Frappe. Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`; tracking: `ROADMAP.md` Phase 1.6 §0. Until cutover, the browser-specific gotchas below (Chromium, `ready` event, `_serialized`, user-agent) still apply to the running Node relay; after cutover they're obsolete and should be removed.
+
 Key insight that shapes the whole design: **Frappe CRM already has a full WhatsApp integration seam** (`crm/api/whatsapp.py`, `WhatsAppBox.vue`, etc.) that works purely off doctype *names* (`WhatsApp Message`, `WhatsApp Account`, `WhatsApp Settings`, `WhatsApp Templates`) — it doesn't care which app supplies them. This app supplies doctypes with the same names/shape as the well-known `frappe_whatsapp` (Meta Cloud API) app, so CRM's frontend and hooks work unmodified, but the controller sends through the relay instead of Meta.
 
 ## Running locally
 
 Site: `whatsapp.localhost`. Apps installed: `frappe`, `erpnext`, `crm`, `yourwhatsapp`. (`frappe_whatsapp`, `telephony`, `whatsapp_automation_pro` exist as source on this bench but are intentionally **not** installed — reference only.)
+
+### Go relay (whatsmeow) — target engine
+
+```bash
+export PATH=$HOME/.local/go/bin:$PATH
+cd apps/yourwhatsapp/yourwhatsapp/yourwhatsapp/relay
+make build && make test     # CGO_ENABLED=0 -> bin/relay
+RELAY_API_KEY=<key> FRAPPE_BASE_URL=http://127.0.0.1:8001 RELAY_PORT=8800 \
+  RELAY_DATA_DIR=$PWD/data bin/relay
+```
+
+At cutover the bench `Procfile` `relay:` line (a bench-local file, not in git; deliberately not changed yet) becomes:
+
+```
+relay: apps/yourwhatsapp/yourwhatsapp/yourwhatsapp/relay/bin/relay
+```
+
+with `<bench>/.env` providing `RELAY_API_KEY`, `FRAPPE_BASE_URL=http://127.0.0.1:8001`, `RELAY_PORT=8800` and `RELAY_DATA_DIR=<abs path>/relay/data`. Env vars and routes: `yourwhatsapp/relay/README.md`. Production (Docker): `DEPLOYMENT.md`.
+
+### Node relay (until cutover)
 
 ```bash
 cd apps/yourwhatsapp/yourwhatsapp/relay
@@ -35,13 +57,22 @@ RELAY_API_KEY=<key> FRAPPE_BASE_URL=http://127.0.0.1:8001 RELAY_PORT=8800 \
   node server.js
 ```
 
-On this bench the relay env vars live in `<bench>/.env`, which honcho loads for the `relay` Procfile entry — `bench start` brings the relay up with everything else.
+On this bench the relay env vars live in `<bench>/.env`, which honcho loads for the `relay` Procfile entry — `bench start` brings the relay up with everything else (currently the Node relay).
 
 `WhatsApp Settings` needs: `relay_base_url` (e.g. `http://localhost:8800`) and `relay_api_key` (same value as `RELAY_API_KEY` above). `relay_reachable_frappe_url` is **not read by any code** — the relay uses its own `FRAPPE_BASE_URL` env var. Phase 1.6 either repurposes or removes that field.
 
 Pairing: create a `WhatsApp Account`, then either click **Connect / Generate QR** on its form, or `POST /session/<session_id>/start` on the relay directly. Scan the QR shown on the account's `qr_code` field from a phone (WhatsApp → Linked Devices).
 
-## Hard-won gotchas (read before touching the relay)
+## Go relay gotchas
+
+- **Go is at `$HOME/.local/go/bin`** and is not on `PATH` — `export PATH=$HOME/.local/go/bin:$PATH` first.
+- **whatsmeow is pinned** in `go.mod` (`v0.0.0-20261030195514-56e5ad0581ce`). It has no tagged releases and breaks often; upgrades are deliberate, tested against real numbers.
+- **One SQLite file, `relay.db`, in `RELAY_DATA_DIR`, holds every linked number's device keys** plus the callback outbox. Back it up (see `DEPLOYMENT.md`); losing it means relinking every number. Treat it as a credential.
+- **Never run two relays against the same data dir (or the same linked number)** — WhatsApp answers with `StreamReplaced` and the two fight. Stop the old one first.
+- **Send is asynchronous:** `POST /message/send` returns 202 `queued`; the real result arrives as a `message_status` callback.
+- Docker files (`relay/Dockerfile`, `relay/compose.whatsapp.yaml`) were written without Docker on the dev host and are untested until the first real deploy.
+
+## Hard-won gotchas — Node relay (until cutover; obsolete afterwards, then delete)
 
 - **`.localhost` domains don't resolve from Node's DNS resolver** on this host, even though curl/browsers handle them fine. Any URL Node needs to fetch (Frappe callback base, or an outgoing attachment URL built via `frappe.utils.get_url()`) must use `http://127.0.0.1:<port>` instead — see `relay_reachable_frappe_url` in `WhatsApp Settings` and `RELAY_PORT`/`FRAPPE_BASE_URL` env vars.
 - **`PORT` env var collides** with something already set in some shells — the relay's port var is named `RELAY_PORT`, not `PORT`.
