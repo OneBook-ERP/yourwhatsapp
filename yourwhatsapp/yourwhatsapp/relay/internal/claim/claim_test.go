@@ -289,3 +289,87 @@ func TestClaimRejectsCredentialedOrDecoratedURL(t *testing.T) {
 		}
 	}
 }
+
+const newKey = "n-ewkey-ewkey-ewkey-ewkey-ewkey-ew"
+
+func claimedState(t *testing.T, now *time.Time) (*State, *store.Store) {
+	t.Helper()
+	st := openStore(t)
+	cs, err := New(st, config.Config{}, func() time.Time { return *now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.Claim(context.Background(), goodKey, "http://a", "site", ""); err != nil {
+		t.Fatal(err)
+	}
+	return cs, st
+}
+
+func TestRotateGraceWindow(t *testing.T) {
+	now := fixedNow
+	cs, st := claimedState(t, &now)
+	if err := cs.Rotate(context.Background(), newKey); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, k := cs.Target(); k != newKey {
+		t.Fatal("Target must return the new key immediately")
+	}
+	now = fixedNow.Add(9 * time.Minute)
+	if !cs.Authorized(goodKey) || !cs.Authorized(newKey) {
+		t.Fatal("old and new key must both work at +9m")
+	}
+	now = fixedNow.Add(11 * time.Minute)
+	if cs.Authorized(goodKey) || !cs.Authorized(newKey) {
+		t.Fatal("old key must be rejected at +11m, new key still ok")
+	}
+	// The new key survives a restart; the grace does not.
+	now = fixedNow
+	again, err := New(st, config.Config{}, func() time.Time { return now })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !again.Authorized(newKey) || again.Authorized(goodKey) {
+		t.Fatal("restart must keep only the persisted new key")
+	}
+}
+
+func TestRotateRejectsShortKey(t *testing.T) {
+	now := fixedNow
+	cs, _ := claimedState(t, &now)
+	if err := cs.Rotate(context.Background(), "short"); !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("err = %v", err)
+	}
+	if !cs.Authorized(goodKey) {
+		t.Fatal("failed rotate must keep the key")
+	}
+}
+
+func TestRotateEnvMode409(t *testing.T) {
+	cs := newState(t, openStore(t), config.Config{APIKey: "envkey"})
+	if err := cs.Rotate(context.Background(), newKey); !errors.Is(err, ErrEnvMode) {
+		t.Fatalf("rotate err = %v", err)
+	}
+	if err := cs.SetCallback(context.Background(), "http://b", "s"); !errors.Is(err, ErrEnvMode) {
+		t.Fatalf("callback err = %v", err)
+	}
+}
+
+func TestSetCallbackPersistsAndTargets(t *testing.T) {
+	now := fixedNow
+	cs, st := claimedState(t, &now)
+	if err := cs.SetCallback(context.Background(), "http://frontend:8080", "crm.example.com"); err != nil {
+		t.Fatal(err)
+	}
+	if u, s, _ := cs.Target(); u != "http://frontend:8080" || s != "crm.example.com" {
+		t.Fatalf("Target = %q %q", u, s)
+	}
+	rc, err := st.GetRelayConfig(context.Background())
+	if err != nil || rc.CallbackURL != "http://frontend:8080" || rc.SiteName != "crm.example.com" {
+		t.Fatalf("stored = %+v, %v", rc, err)
+	}
+	for _, bad := range []string{"ftp://a", "http://u:p@a", "http://a?x=1", "http://a#f", ""} {
+		if err := cs.SetCallback(context.Background(), bad, "s"); !errors.Is(err, ErrBadRequest) {
+			t.Errorf("%q: err = %v", bad, err)
+		}
+	}
+}

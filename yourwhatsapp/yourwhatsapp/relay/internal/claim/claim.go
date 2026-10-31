@@ -24,6 +24,9 @@ const (
 	ModeUnclaimed Mode = "unclaimed"
 )
 
+// RotationGrace is how long the previous key stays valid after Rotate.
+const RotationGrace = 10 * time.Minute
+
 // MinKeyLen is the shortest API key a claim accepts.
 const MinKeyLen = 32
 
@@ -31,6 +34,9 @@ var (
 	ErrAlreadyClaimed    = errors.New("relay already claimed")
 	ErrBadBootstrapToken = errors.New("bad bootstrap token")
 	ErrBadRequest        = errors.New("bad claim request")
+	// ErrEnvMode: an env-claimed relay takes its key and callback from env.
+	ErrEnvMode   = errors.New("relay is claimed through env")
+	ErrUnclaimed = errors.New("relay is not claimed")
 	// ErrPopulatedUnclaimed stops a relay whose data dir holds linked numbers
 	// but no claim from handing them to whoever claims it first.
 	ErrPopulatedUnclaimed = errors.New("relay data dir has linked numbers but no claim; set RELAY_API_KEY or RELAY_BOOTSTRAP_TOKEN")
@@ -47,6 +53,11 @@ type State struct {
 	callbackURL string
 	siteName    string
 	onClaimed   []func()
+	// prevKey is the key replaced by the last Rotate, accepted until
+	// prevExpiry. In memory only: after a restart the grace is gone, which
+	// is safe because Frappe has the new key by then.
+	prevKey    string
+	prevExpiry time.Time
 }
 
 // New loads the relay's identity: env when cfg.APIKey is set, else the stored
@@ -84,7 +95,8 @@ func (s *State) Mode() Mode {
 	return s.mode
 }
 
-// Authorized reports, in constant time, whether key is the relay's API key.
+// Authorized reports, in constant time, whether key is the relay's API key,
+// or the previous one still inside its rotation grace.
 // An unclaimed relay authorizes nobody.
 func (s *State) Authorized(key string) bool {
 	s.mu.RLock()
@@ -92,7 +104,66 @@ func (s *State) Authorized(key string) bool {
 	if s.mode == ModeUnclaimed {
 		return false
 	}
-	return subtle.ConstantTimeCompare([]byte(key), []byte(s.apiKey)) == 1
+	ok := subtle.ConstantTimeCompare([]byte(key), []byte(s.apiKey)) == 1
+	if s.prevKey != "" && s.now().Before(s.prevExpiry) &&
+		subtle.ConstantTimeCompare([]byte(key), []byte(s.prevKey)) == 1 {
+		ok = true
+	}
+	return ok
+}
+
+// Info is the claim data /info shows to an authenticated caller. No key.
+func (s *State) Info() (callbackURL, siteName string) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.callbackURL, s.siteName
+}
+
+// Rotate replaces the API key. It is persisted first, then takes effect at
+// once for callbacks; the old key keeps authorizing requests for RotationGrace.
+func (s *State) Rotate(ctx context.Context, newKey string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.requireStored(); err != nil {
+		return err
+	}
+	if err := validateKey(newKey); err != nil {
+		return err
+	}
+	if err := s.st.UpdateRelayKey(ctx, newKey); err != nil {
+		return fmt.Errorf("store key: %w", err)
+	}
+	s.prevKey, s.prevExpiry = s.apiKey, s.now().Add(RotationGrace)
+	s.apiKey = newKey
+	return nil
+}
+
+// SetCallback changes where callbacks go, with the same URL rules as Claim.
+func (s *State) SetCallback(ctx context.Context, callbackURL, siteName string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if err := s.requireStored(); err != nil {
+		return err
+	}
+	if err := validateCallback(callbackURL); err != nil {
+		return err
+	}
+	if err := s.st.UpdateRelayCallback(ctx, callbackURL, siteName); err != nil {
+		return fmt.Errorf("store callback: %w", err)
+	}
+	s.callbackURL, s.siteName = callbackURL, siteName
+	return nil
+}
+
+// requireStored: only a claimed (stored) identity can change. Caller holds mu.
+func (s *State) requireStored() error {
+	switch s.mode {
+	case ModeEnv:
+		return ErrEnvMode
+	case ModeUnclaimed:
+		return ErrUnclaimed
+	}
+	return nil
 }
 
 // Target is where callbacks go and the key they carry. All empty while unclaimed.
@@ -147,11 +218,22 @@ func (s *State) claim(ctx context.Context, apiKey, callbackURL, siteName, bootst
 	return hooks, nil
 }
 
-// validate never echoes the key or the URL: errors may reach the caller and the log.
 func validate(apiKey, callbackURL string) error {
+	if err := validateKey(apiKey); err != nil {
+		return err
+	}
+	return validateCallback(callbackURL)
+}
+
+// The validators never echo the key or the URL: errors may reach the caller and the log.
+func validateKey(apiKey string) error {
 	if len(apiKey) < MinKeyLen {
 		return fmt.Errorf("%w: api_key must be at least %d characters", ErrBadRequest, MinKeyLen)
 	}
+	return nil
+}
+
+func validateCallback(callbackURL string) error {
 	u, err := url.Parse(callbackURL)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 		return fmt.Errorf("%w: callback_url must be an http(s) URL", ErrBadRequest)

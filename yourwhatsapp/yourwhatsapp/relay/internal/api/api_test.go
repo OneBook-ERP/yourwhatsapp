@@ -37,6 +37,7 @@ func (f *fakeManager) PairCode(_ context.Context, _, _ string, proxy *string) (s
 	f.pairProxy = proxy
 	return "ABCD-1234", f.pairErr
 }
+func (f *fakeManager) Counts() (int, int)                     { return 1, 2 }
 func (f *fakeManager) Status(string) (string, string, string) { return "connected", "1@s", "1" }
 func (f *fakeManager) Pause(context.Context, string) error    { return nil }
 func (f *fakeManager) Resume(context.Context, string, *string) (string, error) {
@@ -66,7 +67,7 @@ func newServerWith(t *testing.T, fm *fakeManager, cfg config.Config) (http.Handl
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewHandler(fm, st, cs, slog.New(slog.NewJSONHandler(io.Discard, nil))), st, cs
+	return NewHandler(fm, st, cs, slog.New(slog.NewJSONHandler(io.Discard, nil)), "test"), st, cs
 }
 
 func do(h http.Handler, method, path, body string, auth bool) *httptest.ResponseRecorder {

@@ -111,3 +111,10 @@ func (s *Store) ListDead(ctx context.Context, limit int) ([]OutboxRow, error) {
 	}
 	return out, rows.Err()
 }
+
+// OutboxCounts returns the callbacks waiting to be delivered and the dead-lettered ones.
+func (s *Store) OutboxCounts(ctx context.Context) (pending, dead int, err error) {
+	err = s.DB.QueryRowContext(ctx,
+		`SELECT (SELECT COUNT(*) FROM outbox), (SELECT COUNT(*) FROM outbox_dead)`).Scan(&pending, &dead)
+	return pending, dead, err
+}

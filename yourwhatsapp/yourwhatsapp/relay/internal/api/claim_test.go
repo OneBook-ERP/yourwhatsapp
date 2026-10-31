@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -95,5 +97,118 @@ func TestClaimRouteSecondClaim409(t *testing.T) {
 	rec := do(h, "POST", "/claim", claimJSON(other, "http://b", ""), false)
 	if rec.Code != 409 || decode(t, rec)["error"] != "already_claimed" {
 		t.Fatalf("second claim = %d %s", rec.Code, rec.Body)
+	}
+}
+
+func infoBody(t *testing.T, h http.Handler, key string) (int, map[string]any, string) {
+	t.Helper()
+	req := httptest.NewRequest("GET", "/info", nil)
+	if key != "" {
+		req.Header.Set("x-api-key", key)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec.Code, decode(t, rec), rec.Body.String()
+}
+
+func TestInfoUnauthenticatedMinimal(t *testing.T) {
+	h, _, _ := newServerWith(t, &fakeManager{}, config.Config{APIKey: testKey})
+	for _, key := range []string{"", "wrong"} {
+		code, m, _ := infoBody(t, h, key)
+		if code != 200 || m["version"] != "test" || m["claimed"] != true || m["mode"] != "env" {
+			t.Fatalf("key %q: %d %v", key, code, m)
+		}
+		for _, k := range []string{"sessions", "outbox", "callback_url", "site_name"} {
+			if _, ok := m[k]; ok {
+				t.Errorf("unauthenticated /info leaks %q", k)
+			}
+		}
+	}
+	h, _, _ = newServerWith(t, &fakeManager{}, config.Config{})
+	if code, m, _ := infoBody(t, h, ""); code != 200 || m["claimed"] != false || m["mode"] != "unclaimed" {
+		t.Fatalf("unclaimed: %d %v", code, m)
+	}
+}
+
+func TestInfoAuthenticatedCounts(t *testing.T) {
+	h, st, _ := newServerWith(t, &fakeManager{}, config.Config{APIKey: testKey, FrappeBaseURL: "http://127.0.0.1:8001", FrappeSiteName: "s.local"})
+	if err := st.EnqueueCallback(context.Background(), "update_qr", map[string]any{"a": 1}); err != nil {
+		t.Fatal(err)
+	}
+	code, m, _ := infoBody(t, h, testKey)
+	if code != 200 {
+		t.Fatal(code)
+	}
+	if s := m["sessions"].(map[string]any); s["connected"] != float64(1) || s["total"] != float64(2) {
+		t.Errorf("sessions = %v", s)
+	}
+	if o := m["outbox"].(map[string]any); o["pending"] != float64(1) || o["dead"] != float64(0) {
+		t.Errorf("outbox = %v", o)
+	}
+	if m["callback_url"] != "http://127.0.0.1:8001" || m["site_name"] != "s.local" {
+		t.Errorf("target = %v %v", m["callback_url"], m["site_name"])
+	}
+}
+
+func TestInfoNeverContainsKey(t *testing.T) {
+	cases := map[string]config.Config{
+		"env":       {APIKey: testKey},
+		"unclaimed": {},
+	}
+	for name, cfg := range cases {
+		h, _, _ := newServerWith(t, &fakeManager{}, cfg)
+		for _, key := range []string{"", testKey} {
+			if _, _, body := infoBody(t, h, key); strings.Contains(body, testKey) {
+				t.Errorf("%s: /info body contains the key: %s", name, body)
+			}
+		}
+	}
+	h, _, _ := newServerWith(t, &fakeManager{}, config.Config{})
+	do(h, "POST", "/claim", claimJSON(claimKey, "http://127.0.0.1:8001", ""), false)
+	for _, key := range []string{"", claimKey} {
+		if _, _, body := infoBody(t, h, key); strings.Contains(body, claimKey) {
+			t.Errorf("claimed: /info body contains the key: %s", body)
+		}
+	}
+}
+
+func TestRotateAndCallbackRoutes(t *testing.T) {
+	h, _, _ := newServerWith(t, &fakeManager{}, config.Config{})
+	do(h, "POST", "/claim", claimJSON(claimKey, "http://127.0.0.1:8001", ""), false)
+	newK := strings.Repeat("r", claim.MinKeyLen)
+	send := func(method, path, body, key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("x-api-key", key)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := send("POST", "/claim/rotate", `{"api_key":"x"}`, "wrong"); rec.Code != 401 {
+		t.Fatalf("wrong key = %d", rec.Code)
+	}
+	if rec := send("POST", "/claim/rotate", `{"api_key":"short"}`, claimKey); rec.Code != 400 {
+		t.Fatalf("short = %d", rec.Code)
+	}
+	if rec := send("POST", "/claim/rotate", `{"api_key":"`+newK+`"}`, claimKey); rec.Code != 200 {
+		t.Fatalf("rotate = %d %s", rec.Code, rec.Body)
+	}
+	if rec := send("PUT", "/claim/callback", `{"callback_url":"http://u:p@h","site_name":"s"}`, newK); rec.Code != 400 {
+		t.Fatalf("bad callback = %d", rec.Code)
+	}
+	if rec := send("PUT", "/claim/callback", `{"callback_url":"http://frontend:8080","site_name":"s"}`, newK); rec.Code != 200 {
+		t.Fatalf("callback = %d %s", rec.Code, rec.Body)
+	}
+}
+
+func TestRotateCallbackEnvMode409(t *testing.T) {
+	h, _ := newServer(t, &fakeManager{})
+	for _, r := range []struct{ method, path, body string }{
+		{"POST", "/claim/rotate", `{"api_key":"` + strings.Repeat("r", claim.MinKeyLen) + `"}`},
+		{"PUT", "/claim/callback", `{"callback_url":"http://a","site_name":"s"}`},
+	} {
+		rec := do(h, r.method, r.path, r.body, true)
+		if rec.Code != 409 || decode(t, rec)["error"] != "env_mode" {
+			t.Errorf("%s = %d %s", r.path, rec.Code, rec.Body)
+		}
 	}
 }

@@ -30,6 +30,9 @@ const (
 	lostSendGrace = 30 * time.Second
 )
 
+// version is stamped at build time: -ldflags "-X main.version=...".
+var version = "dev"
+
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
 		os.Exit(runHealthcheck())
@@ -59,7 +62,7 @@ func run(log *slog.Logger) error {
 	if err != nil {
 		return fmt.Errorf("load relay identity: %w", err)
 	}
-	log.Info("relay identity", "mode", cs.Mode())
+	log.Info("relay identity", "mode", cs.Mode(), "version", version)
 
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	workerDone := make(chan struct{})
@@ -86,7 +89,7 @@ func run(log *slog.Logger) error {
 
 	srv := &http.Server{
 		Addr:              net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
-		Handler:           api.NewHandler(manager, st, cs, log),
+		Handler:           api.NewHandler(manager, st, cs, log, version),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	ln, err := net.Listen("tcp", srv.Addr)

@@ -31,24 +31,29 @@ type Manager interface {
 	Resume(ctx context.Context, id string, proxy *string) (string, error)
 	Logout(ctx context.Context, id string) error
 	Send(ctx context.Context, req session.SendRequest) *session.SendError
+	Counts() (connected, total int)
 }
 
 type handler struct {
-	m   Manager
-	st  *store.Store
-	cs  *claim.State
-	log *slog.Logger
+	m       Manager
+	st      *store.Store
+	cs      *claim.State
+	log     *slog.Logger
+	version string
 }
 
-// NewHandler returns the relay's HTTP handler. Every route but /health and
-// /claim needs x-api-key, and answers 503 unclaimed until the relay is claimed.
-func NewHandler(m Manager, st *store.Store, cs *claim.State, log *slog.Logger) http.Handler {
-	h := &handler{m: m, st: st, cs: cs, log: log}
+// NewHandler returns the relay's HTTP handler. Every route but /health,
+// /claim and /info needs x-api-key, and answers 503 unclaimed until the relay is claimed.
+func NewHandler(m Manager, st *store.Store, cs *claim.State, log *slog.Logger, version string) http.Handler {
+	h := &handler{m: m, st: st, cs: cs, log: log, version: version}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 	})
 	mux.HandleFunc("POST /claim", h.claim)
+	mux.HandleFunc("GET /info", h.info)
+	mux.Handle("POST /claim/rotate", h.auth(h.rotate))
+	mux.Handle("PUT /claim/callback", h.auth(h.setCallback))
 	mux.Handle("POST /session/{id}/start", h.auth(h.start))
 	mux.Handle("POST /session/{id}/pair-code", h.auth(h.pairCode))
 	mux.Handle("GET /session/{id}/status", h.auth(h.status))
@@ -101,6 +106,71 @@ func (h *handler) claim(w http.ResponseWriter, r *http.Request) {
 	default:
 		h.fail(w, r, err)
 	}
+}
+
+func (h *handler) rotate(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		APIKey string `json:"api_key"`
+	}
+	if !decodeBody(w, r, &b, false) {
+		return
+	}
+	if !h.claimChange(w, r, h.cs.Rotate(r.Context(), b.APIKey)) {
+		return
+	}
+	h.log.Info("api key rotated", "grace", claim.RotationGrace.String())
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+func (h *handler) setCallback(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		CallbackURL string `json:"callback_url"`
+		SiteName    string `json:"site_name"`
+	}
+	if !decodeBody(w, r, &b, false) {
+		return
+	}
+	if !h.claimChange(w, r, h.cs.SetCallback(r.Context(), b.CallbackURL, b.SiteName)) {
+		return
+	}
+	h.log.Info("callback updated", "callback_url", redactedURL(b.CallbackURL), "site_name", b.SiteName)
+	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// claimChange answers for a failed rotate/callback change and reports whether it succeeded.
+func (h *handler) claimChange(w http.ResponseWriter, r *http.Request, err error) bool {
+	switch {
+	case err == nil:
+		return true
+	case errors.Is(err, claim.ErrEnvMode):
+		writeError(w, http.StatusConflict, "env_mode", err.Error())
+	case errors.Is(err, claim.ErrBadRequest):
+		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
+	default:
+		h.fail(w, r, err)
+	}
+	return false
+}
+
+// info is open to everyone with the minimal body; a valid key adds the
+// operational detail. It never returns a key.
+func (h *handler) info(w http.ResponseWriter, r *http.Request) {
+	mode := h.cs.Mode()
+	out := map[string]any{"version": h.version, "claimed": mode != claim.ModeUnclaimed, "mode": mode}
+	if h.cs.Authorized(r.Header.Get("x-api-key")) {
+		pending, dead, err := h.st.OutboxCounts(r.Context())
+		if err != nil {
+			h.fail(w, r, err)
+			return
+		}
+		connected, total := h.m.Counts()
+		callbackURL, siteName := h.cs.Info()
+		out["sessions"] = map[string]int{"connected": connected, "total": total}
+		out["outbox"] = map[string]int{"pending": pending, "dead": dead}
+		out["callback_url"] = redactedURL(callbackURL)
+		out["site_name"] = siteName
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // redactedURL hides any password before a URL reaches the log.

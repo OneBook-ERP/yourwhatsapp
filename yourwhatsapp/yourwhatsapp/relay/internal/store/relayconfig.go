@@ -69,3 +69,16 @@ func (s *Store) HasAnyData(ctx context.Context) (bool, error) {
 		EXISTS (SELECT 1 FROM outbox)`).Scan(&has)
 	return has, err
 }
+
+// UpdateRelayKey replaces the stored API key of a claimed relay.
+func (s *Store) UpdateRelayKey(ctx context.Context, apiKey string) error {
+	_, err := s.DB.ExecContext(ctx, `UPDATE relay_config SET api_key = ? WHERE id = 1`, apiKey)
+	return err
+}
+
+// UpdateRelayCallback replaces the stored callback target of a claimed relay.
+func (s *Store) UpdateRelayCallback(ctx context.Context, callbackURL, siteName string) error {
+	_, err := s.DB.ExecContext(ctx,
+		`UPDATE relay_config SET callback_url = ?, site_name = ? WHERE id = 1`, callbackURL, siteName)
+	return err
+}
