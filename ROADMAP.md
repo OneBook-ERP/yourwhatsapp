@@ -36,45 +36,45 @@ Each phase lists an objective, detailed tasks, and status. Update statuses as wo
 
 **Objective:** Make the existing send/receive system safe and operable in production. Production runs in Docker with no shell access for us (no `bench`/`docker exec`), so everything after the initial compose deploy must be configurable from the Desk UI by a System Manager. 🚫 = must fix before go-live; the rest should land before real volume.
 
-### 0. Relay engine migration: whatsapp-web.js → whatsmeow (Go) 🔄 (decided 2026-10-31)
+### 0. Relay engine migration: whatsapp-web.js → whatsmeow (Go) 🔄 (decided 2026-10-31; built, live on dev bench since 2026-10-31 — only Node deletion left)
 Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`. Comparison scored whatsmeow 4.20, Baileys 3.95, Evolution API 3.20 (rejected: v2.4+ requires licensing-server activation), whatsapp-web.js 2.70. No headless browser means the Chromium-specific items below (tini for browser children, `CHROMIUM_PATH`, orphan cleanup, user-agent) are dropped, and several 🚫 items are delivered by the new relay itself (marked "→ §0").
-- [ ] 🚫 Go relay with the same HTTP contract: QR + phone-number pairing, SQLite session store, auto-restore on boot, graceful SIGTERM, persistent callback outbox, idempotent send, per-account send queue with jittered delay + typing, optional per-account proxy, `TemporaryBan` → `RateLimited`.
-- [ ] 🚫 Frappe side: error-code-aware failover, monotonic status, inbound dedupe, `is_lid_sender`, `account_event`, account form buttons (Pair with code, Pause/Resume, Logout), `RateLimited` auto-recovery job.
+- [x] 🚫 Go relay with the same HTTP contract: QR + phone-number pairing, SQLite session store, auto-restore on boot, graceful SIGTERM, persistent callback outbox, idempotent send, per-account send queue with jittered delay + typing, optional per-account proxy, `TemporaryBan` → `RateLimited`.
+- [x] 🚫 Frappe side: error-code-aware failover, monotonic status, inbound dedupe, `is_lid_sender`, `account_event`, account form buttons (Pair with code, Pause/Resume, Logout), `RateLimited` auto-recovery job.
 - [x] Live-test fixes (2026-10-31): template `status`/`for_doctype` so CRM's picker lists templates; outgoing `to` and inbound `from` stored digits only, so a customer's thread links to the same Lead/Deal whichever number carried it; routing and failover never pick the account whose own number is the recipient; media messages need an attachment; a relay 409 "session not running / logged out" marks the account Disconnected; Connect / Pair on an already-paired number sets Active instead of erroring (buttons hidden while Active); sends lost in a relay restart (`relay_restarted`) retry on the same account; orphan public QR images deleted. **No sticky sender**: every outgoing message, replies included, rotates (client requirement, see CLAUDE.md).
 - [ ] Relink every number once; verify against real numbers; delete the Node relay.
 
 ### A. Docker deployment + UI-only setup
-- [ ] 🚫 Relay Docker image (`relay/Dockerfile`): static Go binary, non-root, `/data` volume (→ §0; was Node + Chromium + tini).
-- [ ] 🚫 Example compose service (`whatsapp-relay`): no published port (internal docker network only), sessions volume, `stop_grace_period: 30s`, healthcheck.
+- [x] 🚫 Relay Docker image (`relay/Dockerfile`): static Go binary, non-root, `/data` volume (→ §0; was Node + Chromium + tini).
+- [x] 🚫 Example compose service (`whatsapp-relay`): no published port (internal docker network only), sessions volume, `stop_grace_period: 30s`, healthcheck.
 - [ ] 🚫 **Relay claim flow — no terminal needed for the key.** Relay boots unclaimed (no `RELAY_API_KEY` env required). System Manager enters relay URL in `WhatsApp Settings` → **Connect Relay** → Frappe generates a random key, POSTs it to relay `/claim` along with its callback URL + site name; relay persists it in its volume and rejects any further claims. Key stored in `relay_api_key` (Password). Optional `RELAY_BOOTSTRAP_TOKEN` env to require a token for claiming. Reset = wipe relay volume.
 - [ ] 🚫 Relay sends callbacks with `Host: <site name>` so multi-site benches route correctly; callback URL comes from the claim, replacing the `FRAPPE_BASE_URL` env var. Repurpose (or remove) the currently-unused `relay_reachable_frappe_url` field.
 - [ ] Settings page relay panel: connection status, relay version, session count, **Test Connection**, **Rotate Key**.
-- [ ] `GET /health` on the relay (unauthenticated, no data) for the docker healthcheck (→ §0).
-- [ ] `RELAY_HOST` bind option (default `0.0.0.0` in Docker, `127.0.0.1` for bare-metal installs) (→ §0).
+- [x] `GET /health` on the relay (unauthenticated, no data) for the docker healthcheck (→ §0).
+- [x] `RELAY_HOST` bind option (default `0.0.0.0` in Docker, `127.0.0.1` for bare-metal installs) (→ §0).
 - [ ] Setup guide (`DEPLOYMENT.md`): compose snippet, Settings walkthrough, pairing, backup of the sessions volume.
 
 ### B. Session lifecycle (Docker restarts containers often)
-- [ ] 🚫 (→ §0) Auto-restore every paired session on relay boot (from `.sessions/`) — today a relay restart leaves all accounts `Active` in Frappe but unable to send until manually reconnected.
-- [ ] 🚫 (→ §0) `Connect` must work after a disconnect — `startSession` returns the stale map entry, `disconnected` never removes it.
-- [ ] 🚫 (→ §0) Graceful SIGTERM handler: `client.destroy()` every session before exit. Repeated abrupt kills can get a device unlinked by WhatsApp (see CLAUDE.md gotchas).
+- [x] 🚫 (→ §0) Auto-restore every paired session on relay boot (from `.sessions/`) — today a relay restart leaves all accounts `Active` in Frappe but unable to send until manually reconnected.
+- [x] 🚫 (→ §0) `Connect` must work after a disconnect — `startSession` returns the stale map entry, `disconnected` never removes it.
+- [x] 🚫 (→ §0) Graceful SIGTERM handler: `client.destroy()` every session before exit. Repeated abrupt kills can get a device unlinked by WhatsApp (see CLAUDE.md gotchas).
 - [ ] Status reconciliation: scheduler job polls relay `/session/:id/status` and syncs `WhatsApp Account.status` + `last_health_check` (field exists, unused).
-- [ ] (→ §0) UI buttons on `WhatsApp Account`: **Pause**, **Logout / Unlink**.
+- [x] (→ §0) UI buttons on `WhatsApp Account`: **Pause**, **Logout / Unlink**.
 
 ### C. Security
 - [x] 🚫 Inbound media saved as `is_private=1`; `v1_0.make_whatsapp_files_private` patch flipped the 220 existing files and rewrote their `attach` URLs.
 - [x] 🚫 QR images now private, and deleted (with the `qr_code` field cleared) as soon as the account connects — a live QR is a credential. Same patch dropped the stale public ones.
-- [ ] Delete the 210 orphaned public QR pngs left on disk by the pre-1.5 churn bug (no `File` records; expired, but still publicly served).
-- [ ] Constant-time API key comparison on both sides (relay side → §0) (`hmac.compare_digest` / `crypto.timingSafeEqual`).
+- [x] Delete the 210 orphaned public QR pngs left on disk by the pre-1.5 churn bug (no `File` records; expired, but still publicly served).
+- [x] Constant-time API key comparison on both sides (relay side → §0) (`hmac.compare_digest` / `crypto.timingSafeEqual`).
 - [ ] RBAC audit: who can create/read `WhatsApp Message` (Sales User currently has write), who can see `WhatsApp Account`/`Settings`; `connect()` role check vs doctype perms.
 - [ ] Confirm nginx `client_max_body_size` in the Frappe container allows inbound media callbacks (base64 up to ~22MB).
 
 ### D. Reliability
-- [ ] 🚫 (→ §0) Relay→Frappe callbacks are log-and-drop (`frappe_client.js`) — an inbound message arriving while Frappe restarts during a deploy is lost forever. Persist to a small on-disk queue in the relay volume, retry with backoff.
-- [ ] Failed outgoing messages: **Retry** button + automatic retry when the failure was "relay/session unavailable" (not for invalid numbers).
-- [ ] (→ §0) Ack race: an ack can arrive before `message_id` is saved (now silently ignored) — retry briefly or have the relay return the id synchronously before ack listeners fire; make status monotonic (`Read` must not be overwritten by a late `Delivered`/`Sent`).
-- [ ] Atomic `daily_message_count` increment (`UPDATE ... SET x = x + 1`) — current read-modify-write loses counts under concurrent workers.
-- [ ] (→ §0) Dedupe inbound by `message_id`.
-- [ ] (→ §0, now whatsmeow in `go.mod`) Pin `whatsapp-web.js` to an exact version + `npm ci` in the image — WhatsApp Web changes already broke 1.34.7 once (July 2026); upgrades must be deliberate and tested.
+- [x] 🚫 (→ §0) Relay→Frappe callbacks are log-and-drop (`frappe_client.js`) — an inbound message arriving while Frappe restarts during a deploy is lost forever. Persist to a small on-disk queue in the relay volume, retry with backoff.
+- [x] Failed outgoing messages: **Retry** button + automatic retry when the failure was "relay/session unavailable" (not for invalid numbers).
+- [x] (→ §0) Ack race: an ack can arrive before `message_id` is saved (now silently ignored) — retry briefly or have the relay return the id synchronously before ack listeners fire; make status monotonic (`Read` must not be overwritten by a late `Delivered`/`Sent`).
+- [x] Atomic `daily_message_count` increment (`UPDATE ... SET x = x + 1`) — current read-modify-write loses counts under concurrent workers.
+- [x] (→ §0) Dedupe inbound by `message_id`.
+- [x] (→ §0, now whatsmeow in `go.mod`) Pin `whatsapp-web.js` to an exact version + `npm ci` in the image — WhatsApp Web changes already broke 1.34.7 once (July 2026); upgrades must be deliberate and tested.
 
 ### E. Functional bugs (from 2026-09-18 audit)
 - [x] Status updates (`status@broadcast`), groups (`@g.us`), broadcast lists and channels no longer stored as inbound CRM messages — relay filters to 1:1 chats only. Existing rows kept.
@@ -83,18 +83,18 @@ Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`. Compariso
 - [ ] 🚫 `crm.api.whatsapp.send_whatsapp_template` sends no parameters → templates go out with literal `{{1}}`. Resolve params from the reference doc (or block templates with unresolved placeholders).
 - [ ] Reactions (`content_type: reaction`) are sent as a plain text emoji — use `msg.react()` on the target message.
 - [ ] Replies: pass `quotedMessageId` on outgoing replies; send `reply_to_message_id` on inbound quoted messages so CRM shows reply context.
-- [ ] (→ §0) Unresolvable `@lid` senders are stored as a fake phone number (e.g. `157844527657214`) — store the raw lid in a separate field and flag it instead.
+- [x] (→ §0) Unresolvable `@lid` senders are stored as a fake phone number (e.g. `157844527657214`) — store the raw lid in a separate field and flag it instead.
 - [ ] `default_outgoing_account` (Settings) vs `is_default_outgoing` (Account) duplication; CRM's `is_whatsapp_enabled` requires the Settings one — routing ignores both. Pick one and document it; setup must set it or CRM hides WhatsApp entirely.
 
 ### F. Minimum anti-ban before real volume (subset of Phase 3)
-- [ ] ~~Per-account realistic user-agent~~ — moot with whatsmeow (no browser); device props set in §0.
-- [ ] (→ §0) Randomized inter-send delay per account (queue per account instead of immediate dispatch).
-- [ ] (→ §0) `RateLimited` cooldown → auto-return to `Active`.
+- [x] ~~Per-account realistic user-agent~~ — moot with whatsmeow (no browser); device props set in §0.
+- [x] (→ §0) Randomized inter-send delay per account (queue per account instead of immediate dispatch).
+- [x] (→ §0) `RateLimited` cooldown → auto-return to `Active`.
 - [ ] Warm-up policy documented for new numbers (low `daily_limit`, raise over 1–2 weeks).
 
 ### G. Ops / quality
-- [ ] Tests: routing, `api.py` endpoints (auth, unknown ids, inbound media), `relay_client` failover. None exist today.
-- [ ] (→ §0) Structured JSON logs from the relay to stdout (Docker log driver picks them up).
+- [x] Tests: routing, `api.py` endpoints (auth, unknown ids, inbound media), `relay_client` failover. None exist today.
+- [x] (→ §0) Structured JSON logs from the relay to stdout (Docker log driver picks them up).
 - [ ] Health alert (Notification / System Console) when an account goes `Disconnected`.
 
 ## Phase 2 — Trigger-Based Automated Messaging 🔲 Not started (next after Phase 1.6)
