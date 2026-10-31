@@ -19,10 +19,8 @@ class WhatsAppAccount(Document):
 	@frappe.whitelist()
 	def connect(self):
 		self._check_admin()
-		result = self._relay_post("start", self._proxy_body(), allow_already_paired=True)
+		result = self._relay_post("start", self._proxy_body())
 		status = result.get("status")
-		if status == ALREADY_PAIRED:
-			return self._already_paired()
 		if status == "paused":
 			frappe.throw("Account is paused on the relay; use Resume")
 		if status == "connected" and relay_may_set_status(self.name, "Active"):
@@ -68,13 +66,16 @@ class WhatsAppAccount(Document):
 		return {"proxy": self.proxy or ""}
 
 	def _already_paired(self):
-		"""The relay already holds a linked device for this account: nothing to pair."""
-		if relay_may_set_status(self.name, "Active"):
-			self._set_active()
-		return {
-			"already_paired": True,
-			"message": _("This number is already linked; no pairing needed."),
-		}
+		"""The relay already holds a linked device: start it instead of pairing,
+		and only call it Active once the relay says it is connected."""
+		result = self._relay_post("start", self._proxy_body())
+		if result.get("status") == "connected":
+			if relay_may_set_status(self.name, "Active"):
+				self._set_active()
+			message = _("This number is already linked and connected.")
+		else:
+			message = _("This number is already linked; connecting…")
+		return {"already_paired": True, "message": message}
 
 	def _set_active(self):
 		self.db_set({"status": "Active", "connected_at": now_datetime()})

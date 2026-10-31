@@ -22,8 +22,7 @@ function add_connect_button(frm) {
 		return;
 	}
 	frm.add_custom_button(__("Connect / Generate QR"), () => {
-		frm.call("connect").then((r) => {
-			if (already_paired(frm, r.message)) return;
+		frm.call("connect").then(() => {
 			frappe.show_alert({ message: __("Starting session — waiting for QR..."), indicator: "blue" });
 			poll_until_connected(frm);
 		});

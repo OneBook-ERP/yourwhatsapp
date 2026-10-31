@@ -110,26 +110,40 @@ class TestWhatsAppAccount(IntegrationTestCase):
 
 	ALREADY_PAIRED = {"error": "conflict", "detail": "session is already paired"}
 
-	def test_already_paired_sets_active_without_error(self):
-		for method in ("connect", "pair_with_code"):
-			with self.subTest(method=method):
-				self.account.db_set({"status": "Disconnected", "connected_at": None})
-				errors_before = frappe.db.count("Error Log")
-				with patch("requests.post", return_value=relay_response(409, self.ALREADY_PAIRED)):
-					result = getattr(self.account, method)()
-				self.assertTrue(result["already_paired"])
-				self.assertIn("already linked", result["message"])
-				self.assertNotIn("code", result)
-				row = self._account_row()
-				self.assertEqual(row.status, "Active")
-				self.assertIsNotNone(row.connected_at)
-				self.assertEqual(frappe.db.count("Error Log"), errors_before)
+	def _pair_already_paired(self, start_status):
+		responses = [relay_response(409, self.ALREADY_PAIRED), relay_response(body={"status": start_status})]
+		with patch("requests.post", side_effect=responses) as post:
+			result = self.account.pair_with_code()
+		return result, post
+
+	def test_already_paired_connected_sets_active(self):
+		self.account.db_set({"status": "Disconnected", "connected_at": None})
+		errors_before = frappe.db.count("Error Log")
+		result, post = self._pair_already_paired("connected")
+		self.assertTrue(post.call_args.args[0].endswith(f"/session/{self.account.session_id}/start"))
+		self.assertEqual(post.call_args.kwargs["json"], {"proxy": "socks5://proxy.test:1080"})
+		self.assertTrue(result["already_paired"])
+		self.assertIn("already linked", result["message"])
+		self.assertNotIn("code", result)
+		row = self._account_row()
+		self.assertEqual(row.status, "Active")
+		self.assertIsNotNone(row.connected_at)
+		self.assertEqual(frappe.db.count("Error Log"), errors_before)
+
+	def test_already_paired_not_yet_connected_leaves_status(self):
+		self.account.db_set("status", "Disconnected")
+		result, _post = self._pair_already_paired("connecting")
+		self.assertIn("connecting", result["message"])
+		self.assertEqual(self._account_row().status, "Disconnected")
 
 	def test_already_paired_keeps_paused(self):
 		self.account.db_set("status", "Paused")
-		with patch("requests.post", return_value=relay_response(409, self.ALREADY_PAIRED)):
-			self.account.connect()
+		self._pair_already_paired("connected")
 		self.assertEqual(self._account_row().status, "Paused")
+
+	def test_connect_does_not_swallow_conflicts(self):
+		with patch("requests.post", return_value=relay_response(409, self.ALREADY_PAIRED)):
+			self.assertRaises(frappe.ValidationError, self.account.connect)
 
 	def test_relay_paused_conflict_still_throws(self):
 		body = {"error": "conflict", "detail": "session is paused"}

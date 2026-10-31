@@ -226,10 +226,11 @@ The HTTP call returns as soon as the message is accepted. The Frappe worker neve
     - `connect()` reads the relay's `status`: `connected` → `Active` and `connected_at` (unless the account is `Paused` or held `RateLimited`); `paused` → error "Account is paused on the relay; use Resume". `resume()` stays relay-first: `connected` → `Active` and `connected_at`, otherwise `Disconnected`.
 - **Live-test additions (2026-10-31):**
   - `WhatsApp Message` stores outgoing `to` and inbound `from` as digits only, so CRM links every message with a customer to the same Lead/Deal whichever account carried it. **No sticky sender:** every outgoing message, replies included, rotates via `routing.pick_account`.
+  - When `reference_doctype`/`reference_name` are not set, `WhatsApp Message.validate` resolves them with CRM's `get_contact_lead_or_deal_from_number("+<digits>")` (skipping LIDs): CRM's own hook parses bare digits as Indian, so non-Indian numbers would never link.
   - Routing and failover never pick an account whose own `phone_number` (as digits) is the recipient.
   - An outgoing `image`/`video`/`audio`/`document` message without `attach` (and not a template) is rejected on insert.
-  - A synchronous 409 `session_unavailable` whose detail says the session is not running, not started or logged out sets the account `Disconnected` (never over `Paused`) as Frappe fails over; "send queue is full" does not.
-  - `connect()` / `pair_with_code()`: a relay 409 "already paired" sets `Active` (unless `Paused` or held `RateLimited`) and returns a message instead of an error. The form hides Connect / Pair while the account is `Active`.
+  - A synchronous 409 `session_unavailable` whose detail says the session is not running, not started or logged out sets the account `Disconnected` (never over `Paused` or a held `RateLimited`) as Frappe fails over; "send queue is full" does not.
+  - `pair_with_code()`: on a relay 409 "already paired" it calls `/start` instead and sets `Active` (unless `Paused` or held `RateLimited`) only if the relay answers `connected`; otherwise it reports "already linked; connecting…" and leaves the status. Either way it returns a message, not an error. The form hides Connect / Pair while the account is `Active`.
   - `WhatsApp Templates` gets Select `status` (`APPROVED` | `PENDING` | `REJECTED`, default `APPROVED`) and Link `for_doctype`, which CRM's template picker filters on; a patch approves existing rows.
 - **Scheduler (every 5 min):** accounts in `RateLimited` whose `rate_limited_until` has passed go back to `Active`.
 - **Scheduler (every minute):** re-dispatch relay-unavailable messages whose `next_retry_at` is due (see `relay_client.py` above).
