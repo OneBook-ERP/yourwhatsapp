@@ -23,7 +23,7 @@ class WhatsAppAccount(Document):
 		self._check_admin()
 		if not self.phone_number:
 			frappe.throw("Set the account's phone number before pairing with a code.")
-		result = self._relay_post("pair-code", {"phone": self.phone_number})
+		result = self._relay_post("pair-code", {"phone": self.phone_number, "proxy": self.proxy or None})
 		return {"code": result["code"]}
 
 	@frappe.whitelist()
@@ -51,12 +51,15 @@ class WhatsAppAccount(Document):
 
 	def _relay_post(self, action, body=None):
 		base_url, api_key = relay_settings()
-		response = requests.post(
-			f"{base_url}/session/{self.session_id}/{action}",
-			headers={"x-api-key": api_key},
-			json=body,
-			timeout=TIMEOUT,
-		)
+		try:
+			response = requests.post(
+				f"{base_url}/session/{self.session_id}/{action}",
+				headers={"x-api-key": api_key},
+				json=body,
+				timeout=TIMEOUT,
+			)
+		except requests.exceptions.RequestException as exc:
+			frappe.throw(f"Relay not reachable: {exc}")
 		if response.status_code >= 400:
 			frappe.throw(_relay_error_message(response))
 		return response.json()

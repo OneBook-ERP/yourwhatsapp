@@ -218,7 +218,7 @@ func (m *Manager) start(ctx context.Context, id string, proxy *string, interacti
 
 // PairCode begins phone-number pairing for an unpaired account and returns
 // the code the user types on their phone.
-func (m *Manager) PairCode(ctx context.Context, sessionID, rawPhone string) (string, error) {
+func (m *Manager) PairCode(ctx context.Context, sessionID, rawPhone string, proxy *string) (string, error) {
 	digits, err := phone.Normalize(rawPhone)
 	if err != nil {
 		return "", err
@@ -234,7 +234,7 @@ func (m *Manager) PairCode(ctx context.Context, sessionID, rawPhone string) (str
 		}
 		m.retire(s)
 	}
-	acct, err := m.prepareAccount(ctx, sessionID, nil)
+	acct, err := m.prepareAccount(ctx, sessionID, proxy)
 	if err != nil {
 		return "", err
 	}

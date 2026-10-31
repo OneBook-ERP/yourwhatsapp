@@ -42,28 +42,45 @@ function add_session_buttons(frm) {
 }
 
 function pair_with_code(frm) {
-	// The relay needs a started session before it can issue a pairing code.
-	frm.call("connect")
-		.then(() => frm.call("pair_with_code"))
-		.then((r) => show_pairing_dialog(frm, r.message.code));
+	frm.call("pair_with_code").then((r) => show_pairing_dialog(frm, r.message.code));
 }
 
 function show_pairing_dialog(frm, code) {
 	const dialog = new frappe.ui.Dialog({
 		title: __("Pair with phone number"),
 		fields: [{ fieldtype: "HTML", fieldname: "code_html" }],
-		on_hide: () => (frm._pairing_dialog_open = false),
 	});
 	dialog.get_field("code_html").$wrapper.html(
 		`<div style="font-family: monospace; font-size: 2rem; letter-spacing: 0.15em; text-align: center; margin: 1rem 0;">${frappe.utils.escape_html(code)}</div>
 		<p class="text-muted">${frappe.utils.escape_html(PAIRING_INSTRUCTIONS)}</p>`
 	);
-	frm._pairing_dialog_open = true;
 	dialog.show();
-	poll_until_connected(frm, () => dialog.hide());
+	poll_pairing_dialog(frm, dialog);
 }
 
-function poll_until_connected(frm, on_connected) {
+// Own poll, independent of the QR poll: every 5 s for up to 5 min, stops when
+// the user closes the dialog, and closes it once the account turns Active.
+function poll_pairing_dialog(frm, dialog) {
+	const POLL_MS = 5000;
+	const MAX_ATTEMPTS = 60;
+	let attempts = 0;
+
+	const interval = setInterval(() => {
+		attempts++;
+		if (!dialog.is_visible || attempts > MAX_ATTEMPTS) {
+			clearInterval(interval);
+			return;
+		}
+		frm.reload_doc().then(() => {
+			if (frm.doc.status !== "Active") return;
+			clearInterval(interval);
+			dialog.hide();
+			frappe.show_alert({ message: __("WhatsApp account connected"), indicator: "green" });
+		});
+	}, POLL_MS);
+}
+
+function poll_until_connected(frm) {
 	if (frm._qr_poll_active) return;
 
 	// QR codes rotate every ~20-30s until scanned; keep reloading so the
@@ -78,7 +95,6 @@ function poll_until_connected(frm, on_connected) {
 		if (attempts > MAX_ATTEMPTS || frm.is_dirty() || frm.doc.status !== "Disconnected") {
 			clearInterval(interval);
 			frm._qr_poll_active = false;
-			if (on_connected && frm.doc.status === "Active") on_connected();
 			return;
 		}
 		frm.reload_doc();

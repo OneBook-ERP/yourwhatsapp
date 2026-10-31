@@ -1,6 +1,7 @@
 from unittest.mock import MagicMock, patch
 
 import frappe
+import requests
 from frappe.tests import IntegrationTestCase
 
 RELAY_KEY = "test-relay-key"
@@ -58,7 +59,7 @@ class TestWhatsAppAccount(IntegrationTestCase):
 		with patch("requests.post", return_value=relay_response(body={"code": "ABCD-1234"})) as post:
 			result = self.account.pair_with_code()
 		self.assertEqual(result, {"code": "ABCD-1234"})
-		self.assertEqual(post.call_args.kwargs["json"], {"phone": "+1 555 000 1111"})
+		self.assertEqual(post.call_args.kwargs["json"], {"phone": "+1 555 000 1111", "proxy": "socks5://proxy.test:1080"})
 
 	def test_pair_with_code_surfaces_relay_error(self):
 		body = {"error": "already_paired", "detail": "Session is already paired"}
@@ -66,6 +67,12 @@ class TestWhatsAppAccount(IntegrationTestCase):
 			with self.assertRaises(frappe.ValidationError) as ctx:
 				self.account.pair_with_code()
 		self.assertIn("Session is already paired", str(ctx.exception))
+
+	def test_relay_unreachable_shows_message(self):
+		with patch("requests.post", side_effect=requests.exceptions.ConnectionError("refused")):
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				self.account.pause()
+		self.assertIn("Relay not reachable", str(ctx.exception))
 
 	def test_pause_sets_paused(self):
 		with patch("requests.post", return_value=relay_response()) as post:

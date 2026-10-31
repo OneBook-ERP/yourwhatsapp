@@ -24,7 +24,7 @@ const (
 // Manager is the subset of *session.Manager the API drives.
 type Manager interface {
 	Start(ctx context.Context, id string, proxy *string) (string, error)
-	PairCode(ctx context.Context, id, rawPhone string) (string, error)
+	PairCode(ctx context.Context, id, rawPhone string, proxy *string) (string, error)
 	Status(id string) (status, jid, phoneNumber string)
 	Pause(ctx context.Context, id string) error
 	Resume(ctx context.Context, id string, proxy *string) error
@@ -87,12 +87,13 @@ func (h *handler) start(w http.ResponseWriter, r *http.Request) {
 
 func (h *handler) pairCode(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		Phone string `json:"phone"`
+		Phone string  `json:"phone"`
+		Proxy *string `json:"proxy"`
 	}
 	if !decodeBody(w, r, &body, false) {
 		return
 	}
-	code, err := h.m.PairCode(r.Context(), r.PathValue("id"), body.Phone)
+	code, err := h.m.PairCode(r.Context(), r.PathValue("id"), body.Phone, body.Proxy)
 	if err != nil {
 		h.fail(w, r, err)
 		return

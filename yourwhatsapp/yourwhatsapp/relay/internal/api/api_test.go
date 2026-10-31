@@ -20,6 +20,7 @@ const testKey = "secret"
 type fakeManager struct {
 	startID    string
 	startProxy *string
+	pairProxy  *string
 	pairErr    error
 	sendErr    *session.SendError
 	sendReq    session.SendRequest
@@ -29,7 +30,8 @@ func (f *fakeManager) Start(_ context.Context, id string, proxy *string) (string
 	f.startID, f.startProxy = id, proxy
 	return "qr_pending", nil
 }
-func (f *fakeManager) PairCode(_ context.Context, _, _ string) (string, error) {
+func (f *fakeManager) PairCode(_ context.Context, _, _ string, proxy *string) (string, error) {
+	f.pairProxy = proxy
 	return "ABCD-1234", f.pairErr
 }
 func (f *fakeManager) Status(string) (string, string, string) { return "connected", "1@s", "1" }
@@ -116,6 +118,13 @@ func TestPairCode(t *testing.T) {
 	rec := do(h, "POST", "/session/a/pair-code", `{"phone":"+91 98765 43210"}`, true)
 	if rec.Code != 200 || decode(t, rec)["code"] != "ABCD-1234" {
 		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	if fm.pairProxy != nil {
+		t.Fatalf("absent proxy should give nil, got %q", *fm.pairProxy)
+	}
+	do(h, "POST", "/session/a/pair-code", `{"phone":"1","proxy":"socks5://p:1"}`, true)
+	if fm.pairProxy == nil || *fm.pairProxy != "socks5://p:1" {
+		t.Fatalf("pair proxy = %v", fm.pairProxy)
 	}
 	fm.pairErr = phone.ErrInvalid
 	if rec := do(h, "POST", "/session/a/pair-code", `{"phone":"x"}`, true); rec.Code != 422 || decode(t, rec)["error"] != "invalid_number" {

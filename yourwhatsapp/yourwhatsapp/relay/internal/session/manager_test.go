@@ -76,7 +76,7 @@ func TestStartAfterLogoutRebuilds(t *testing.T) {
 
 func TestPairCodeReturnsCodeWithoutPushingQR(t *testing.T) {
 	h := newHarness(t)
-	code, err := h.m.PairCode(context.Background(), "A", "+91 98765 43210")
+	code, err := h.m.PairCode(context.Background(), "A", "+91 98765 43210", nil)
 	if err != nil || code != "ABCD-1234" {
 		t.Fatalf("PairCode = %q, %v", code, err)
 	}
@@ -94,10 +94,22 @@ func TestPairCodeReturnsCodeWithoutPushingQR(t *testing.T) {
 	}
 }
 
+func TestPairCodeStoresProxy(t *testing.T) {
+	h := newHarness(t)
+	proxy := "socks5://10.0.0.1:1080"
+	if _, err := h.m.PairCode(context.Background(), "A", "+919876543210", &proxy); err != nil {
+		t.Fatal(err)
+	}
+	acct, _, _ := h.st.GetAccount(context.Background(), "A")
+	if acct.Proxy != proxy {
+		t.Errorf("stored proxy = %q", acct.Proxy)
+	}
+}
+
 func TestPairCodeRejectsPairedSession(t *testing.T) {
 	h := newHarness(t)
 	h.connected("A", testJID)
-	if _, err := h.m.PairCode(context.Background(), "A", "+919876543210"); !errors.Is(err, ErrAlreadyPaired) {
+	if _, err := h.m.PairCode(context.Background(), "A", "+919876543210", nil); !errors.Is(err, ErrAlreadyPaired) {
 		t.Fatalf("err = %v, want ErrAlreadyPaired", err)
 	}
 }
