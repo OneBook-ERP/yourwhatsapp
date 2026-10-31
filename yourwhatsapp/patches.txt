@@ -6,3 +6,4 @@
 # Patches added in this section will be executed after doctypes are migrated
 yourwhatsapp.patches.v1_0.make_whatsapp_files_private
 yourwhatsapp.patches.v1_0.approve_existing_whatsapp_templates
+yourwhatsapp.patches.v1_0.delete_orphan_public_qr_images
