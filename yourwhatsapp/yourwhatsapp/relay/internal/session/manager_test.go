@@ -3,8 +3,11 @@ package session
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
+
+	"go.mau.fi/whatsmeow/types"
 
 	"yourwhatsapp/relay/internal/outbox"
 	"yourwhatsapp/relay/internal/store"
@@ -403,5 +406,29 @@ func TestShutdownDisconnectsAll(t *testing.T) {
 	}
 	if _, err := h.m.Start(ctx, "C", nil); !errors.Is(err, ErrShuttingDown) {
 		t.Errorf("Start after shutdown = %v", err)
+	}
+}
+
+// Frappe (relay_client.SESSION_DOWN) marks an account Disconnected on exactly
+// these 409 details; keep them in step.
+func TestSessionDownDetails(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	// A new session is not_started until its client connects.
+	h.m.setInactive("C", StatusNotStarted, types.EmptyJID)
+	h.connected("A", testJID)
+	if err := h.m.Logout(ctx, "A"); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"unknown": "session is not running",
+		"C":       "session is not_started",
+		"A":       "session is logged_out",
+	}
+	for id, want := range cases {
+		serr := h.send(SendRequest{SessionID: id, To: "+919000000001", Message: "hi", LocalID: "m-" + id})
+		if serr == nil || serr.HTTP != http.StatusConflict || serr.Code != CodeSessionUnavailable || serr.Detail != want {
+			t.Errorf("%s: %+v, want 409 %s %q", id, serr, CodeSessionUnavailable, want)
+		}
 	}
 }

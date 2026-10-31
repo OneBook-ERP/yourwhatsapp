@@ -395,6 +395,9 @@ func (m *Manager) Send(ctx context.Context, req SendRequest) *SendError {
 	}
 	s := m.session(req.SessionID)
 	if s == nil {
+		// Frappe (relay_client.SESSION_DOWN) marks the account Disconnected on
+		// this detail and on sendBlocker's not_started / logged_out; pinned by
+		// TestSessionDownDetails.
 		return &SendError{Code: CodeSessionUnavailable, HTTP: http.StatusConflict, Detail: "session is not running"}
 	}
 	if code, detail := s.sendBlocker(); code != "" {

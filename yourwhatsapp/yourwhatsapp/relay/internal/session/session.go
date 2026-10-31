@@ -468,6 +468,8 @@ func (s *Session) sendBlocker() (code, detail string) {
 	case status == StatusTempBanned:
 		return CodeTempBanned, "temporarily banned until " + until.Format(time.RFC3339)
 	case status != StatusConnected || s.client == nil || !s.client.IsConnected():
+		// Frappe matches "session is not_started" / "session is logged_out"
+		// (relay_client.SESSION_DOWN); pinned by TestSessionDownDetails.
 		return CodeSessionUnavailable, "session is " + status
 	}
 	return "", ""

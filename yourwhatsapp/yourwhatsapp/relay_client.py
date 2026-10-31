@@ -20,7 +20,9 @@ SEND_METHOD = "yourwhatsapp.yourwhatsapp.relay_client.send_message"
 # message is parked Queued and re-dispatched after these delays; then Failed.
 RELAY_RETRY_MINUTES = (1, 2, 5, 10, 20)
 # A 409 session_unavailable whose detail means the relay has no live session
-# for the account (as opposed to a transient state such as a full queue).
+# for the account (as opposed to a transient state such as a full queue). The
+# relay's exact details ("session is not running", "session is not_started",
+# "session is logged_out") are pinned by Go's TestSessionDownDetails.
 SESSION_DOWN = re.compile(r"not running|not[_ ]started|logged[_ ]out")
 
 
