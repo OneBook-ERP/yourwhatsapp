@@ -82,3 +82,9 @@ func (s *Store) UpdateRelayCallback(ctx context.Context, callbackURL, siteName s
 		`UPDATE relay_config SET callback_url = ?, site_name = ? WHERE id = 1`, callbackURL, siteName)
 	return err
 }
+
+// CountLinkedAccounts returns how many accounts have a linked number.
+func (s *Store) CountLinkedAccounts(ctx context.Context) (n int, err error) {
+	err = s.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM accounts WHERE jid IS NOT NULL AND jid != ''`).Scan(&n)
+	return n, err
+}

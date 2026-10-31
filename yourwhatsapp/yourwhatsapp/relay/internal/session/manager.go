@@ -313,8 +313,8 @@ func (m *Manager) Status(sessionID string) (status, jid, phoneNumber string) {
 	return status, "", ""
 }
 
-// Counts returns how many in-memory sessions are connected, and how many exist.
-func (m *Manager) Counts() (connected, total int) {
+// Connected returns how many live sessions are connected right now.
+func (m *Manager) Connected() (connected int) {
 	m.mu.Lock()
 	sessions := make([]*Session, 0, len(m.sessions))
 	for _, s := range m.sessions {
@@ -326,7 +326,7 @@ func (m *Manager) Counts() (connected, total int) {
 			connected++
 		}
 	}
-	return connected, len(sessions)
+	return connected
 }
 
 // Pause disconnects the account and keeps it down across restarts.

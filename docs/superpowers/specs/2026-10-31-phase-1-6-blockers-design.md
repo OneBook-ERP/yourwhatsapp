@@ -44,7 +44,7 @@ Separately, CRM sends templates with no parameters, so customers receive literal
 ## 6. Relay claim flow
 
 ### 6.1 Relay state
-New table `relay_config` (single row): `api_key_hash` (SHA-256 hex of the key), `callback_url`, `site_name`, `claimed_at`.
+New table `relay_config` (single row): `api_key` (plaintext, see Key storage), `callback_url`, `site_name`, `claimed_at`.
 
 - **Startup modes:**
   - If `RELAY_API_KEY` is set in env, the relay is **env-claimed**: the key comes from env, and callback/site come from `FRAPPE_BASE_URL` / `FRAPPE_SITE_NAME`. `/claim` answers 409 `already_claimed`. (Dev and back-compat.)
@@ -54,7 +54,7 @@ New table `relay_config` (single row): `api_key_hash` (SHA-256 hex of the key), 
     - The outbox worker is idle.
     - No sessions are restored.
 - **Key storage (decided):** plaintext only, in `relay_config.api_key`, compared in constant time. The outbox poster needs the plaintext anyway, and `relay.db` is already a credential. The `api_key_hash` column is dropped from the schema above.
-- **Rotation grace:** after `/claim/rotate` the relay accepts **both** old and new key for incoming requests for 10 minutes; callbacks switch to the new key immediately. `/claim/callback` and `/claim/rotate` answer 409 in env mode.
+- **Rotation grace:** after `/claim/rotate` the relay accepts **both** old and new key for incoming requests for 10 minutes; callbacks switch to the new key immediately. `/claim/callback` and `/claim/rotate` answer 409 in env mode. Both require the **current** key only: the grace key is refused (401), so a leaked old key can't redirect callbacks or rotate again. One exception: `/claim/rotate` called with the grace key and a `api_key` equal to the current key is a 200 no-op, so Frappe can safely retry a rotation whose 200 it lost.
 - **`RELAY_BOOTSTRAP_TOKEN`** (optional env). When set, `/claim` requires `bootstrap_token` to match it (constant-time compare). DEPLOYMENT.md recommends setting it in production.
 
 ### 6.2 Routes

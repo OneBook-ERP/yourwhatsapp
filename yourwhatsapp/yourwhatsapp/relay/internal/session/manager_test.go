@@ -432,3 +432,12 @@ func TestSessionDownDetails(t *testing.T) {
 		}
 	}
 }
+
+func TestConnectedCountsOnlyLiveConnectedSessions(t *testing.T) {
+	h := newHarness(t)
+	h.connected("A", testJID)
+	h.pairedAccount("B", "5511999990000:3@s.whatsapp.net") // linked, not running
+	if n := h.m.Connected(); n != 1 {
+		t.Fatalf("Connected = %d, want 1", n)
+	}
+}

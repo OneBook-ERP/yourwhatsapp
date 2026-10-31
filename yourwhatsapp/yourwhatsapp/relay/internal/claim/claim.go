@@ -101,15 +101,29 @@ func (s *State) Mode() Mode {
 func (s *State) Authorized(key string) bool {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
-	if s.mode == ModeUnclaimed {
-		return false
-	}
-	ok := subtle.ConstantTimeCompare([]byte(key), []byte(s.apiKey)) == 1
-	if s.prevKey != "" && s.now().Before(s.prevExpiry) &&
-		subtle.ConstantTimeCompare([]byte(key), []byte(s.prevKey)) == 1 {
-		ok = true
-	}
-	return ok
+	current, grace := s.matchesCurrent(key), s.matchesGrace(key)
+	return current || grace
+}
+
+// AuthorizedCurrent is Authorized without the grace key. It guards the
+// routes that change the relay's identity: a leaked old key must not be able
+// to redirect callbacks or rotate again.
+func (s *State) AuthorizedCurrent(key string) bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.matchesCurrent(key)
+}
+
+// matchesCurrent and matchesGrace run their compare unconditionally, so the
+// time taken doesn't reveal which key was close. Caller holds mu.
+func (s *State) matchesCurrent(key string) bool {
+	eq := subtle.ConstantTimeCompare([]byte(key), []byte(s.apiKey)) == 1
+	return eq && s.mode != ModeUnclaimed
+}
+
+func (s *State) matchesGrace(key string) bool {
+	eq := subtle.ConstantTimeCompare([]byte(key), []byte(s.prevKey)) == 1
+	return eq && s.prevKey != "" && s.mode != ModeUnclaimed && s.now().Before(s.prevExpiry)
 }
 
 // Info is the claim data /info shows to an authenticated caller. No key.

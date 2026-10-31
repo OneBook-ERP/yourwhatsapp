@@ -77,3 +77,25 @@ func TestHasAnyData(t *testing.T) {
 		})
 	}
 }
+
+func TestCountLinkedAccounts(t *testing.T) {
+	ctx := context.Background()
+	st, err := Open(ctx, t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+	for _, id := range []string{"a", "b", "c"} {
+		if err := st.UpsertAccount(ctx, id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{"a", "b"} {
+		if err := st.SetAccountJID(ctx, id, "1@s.whatsapp.net"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if n, err := st.CountLinkedAccounts(ctx); err != nil || n != 2 {
+		t.Fatalf("count = %d, %v; want 2 (c has no jid)", n, err)
+	}
+}

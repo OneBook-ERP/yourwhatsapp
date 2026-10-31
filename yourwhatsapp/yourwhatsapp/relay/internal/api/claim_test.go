@@ -135,6 +135,16 @@ func TestInfoAuthenticatedCounts(t *testing.T) {
 	if err := st.EnqueueCallback(context.Background(), "update_qr", map[string]any{"a": 1}); err != nil {
 		t.Fatal(err)
 	}
+	for _, id := range []string{"a", "b", "unlinked"} {
+		if err := st.UpsertAccount(context.Background(), id); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, id := range []string{"a", "b"} {
+		if err := st.SetAccountJID(context.Background(), id, "1@s.whatsapp.net"); err != nil {
+			t.Fatal(err)
+		}
+	}
 	code, m, _ := infoBody(t, h, testKey)
 	if code != 200 {
 		t.Fatal(code)
@@ -210,5 +220,68 @@ func TestRotateCallbackEnvMode409(t *testing.T) {
 		if rec.Code != 409 || decode(t, rec)["error"] != "env_mode" {
 			t.Errorf("%s = %d %s", r.path, rec.Code, rec.Body)
 		}
+	}
+}
+
+// rotatedRelay is a claimed relay that has just rotated claimKey -> rotatedKey,
+// so claimKey is the grace key.
+func rotatedRelay(t *testing.T) (send func(method, path, body, key string) *httptest.ResponseRecorder, rotatedKey string, cs *claim.State) {
+	t.Helper()
+	h, _, cs := newServerWith(t, &fakeManager{}, config.Config{})
+	do(h, "POST", "/claim", claimJSON(claimKey, "http://127.0.0.1:8001", ""), false)
+	rotatedKey = strings.Repeat("r", claim.MinKeyLen)
+	send = func(method, path, body, key string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest(method, path, strings.NewReader(body))
+		req.Header.Set("x-api-key", key)
+		rec := httptest.NewRecorder()
+		h.ServeHTTP(rec, req)
+		return rec
+	}
+	if rec := send("POST", "/claim/rotate", `{"api_key":"`+rotatedKey+`"}`, claimKey); rec.Code != 200 {
+		t.Fatalf("rotate = %d", rec.Code)
+	}
+	return send, rotatedKey, cs
+}
+
+func TestGraceKeyCannotChangeCallback(t *testing.T) {
+	send, rotatedKey, cs := rotatedRelay(t)
+	body := `{"callback_url":"http://attacker.example","site_name":"s"}`
+	if rec := send("PUT", "/claim/callback", body, claimKey); rec.Code != 401 {
+		t.Fatalf("grace key callback = %d, want 401", rec.Code)
+	}
+	if u, _, _ := cs.Target(); u != "http://127.0.0.1:8001" {
+		t.Fatalf("callback changed to %q", u)
+	}
+	if rec := send("PUT", "/claim/callback", body, rotatedKey); rec.Code != 200 {
+		t.Fatalf("current key callback = %d", rec.Code)
+	}
+}
+
+func TestGraceKeyCannotRotateToDifferentKey(t *testing.T) {
+	send, rotatedKey, cs := rotatedRelay(t)
+	other := strings.Repeat("o", claim.MinKeyLen)
+	if rec := send("POST", "/claim/rotate", `{"api_key":"`+other+`"}`, claimKey); rec.Code != 401 {
+		t.Fatalf("grace key rotate = %d, want 401", rec.Code)
+	}
+	if _, _, k := cs.Target(); k != rotatedKey {
+		t.Fatal("key changed")
+	}
+	if rec := send("POST", "/claim/rotate", `{"api_key":"`+other+`"}`, rotatedKey); rec.Code != 200 {
+		t.Fatalf("current key rotate = %d", rec.Code)
+	}
+}
+
+// Frappe lost the 200 and retries the same rotation with the old key: a no-op 200.
+func TestGraceKeyRotateToCurrentKeyIsIdempotent(t *testing.T) {
+	send, rotatedKey, cs := rotatedRelay(t)
+	rec := send("POST", "/claim/rotate", `{"api_key":"`+rotatedKey+`"}`, claimKey)
+	if rec.Code != 200 {
+		t.Fatalf("idempotent retry = %d %s", rec.Code, rec.Body)
+	}
+	if _, _, k := cs.Target(); k != rotatedKey {
+		t.Fatal("key changed")
+	}
+	if !cs.Authorized(claimKey) || cs.AuthorizedCurrent(claimKey) {
+		t.Fatal("retry must leave the old key as grace only, window unchanged")
 	}
 }

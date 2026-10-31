@@ -31,7 +31,7 @@ type Manager interface {
 	Resume(ctx context.Context, id string, proxy *string) (string, error)
 	Logout(ctx context.Context, id string) error
 	Send(ctx context.Context, req session.SendRequest) *session.SendError
-	Counts() (connected, total int)
+	Connected() int
 }
 
 type handler struct {
@@ -53,7 +53,7 @@ func NewHandler(m Manager, st *store.Store, cs *claim.State, log *slog.Logger, v
 	mux.HandleFunc("POST /claim", h.claim)
 	mux.HandleFunc("GET /info", h.info)
 	mux.Handle("POST /claim/rotate", h.auth(h.rotate))
-	mux.Handle("PUT /claim/callback", h.auth(h.setCallback))
+	mux.Handle("PUT /claim/callback", h.authCurrent(h.setCallback))
 	mux.Handle("POST /session/{id}/start", h.auth(h.start))
 	mux.Handle("POST /session/{id}/pair-code", h.auth(h.pairCode))
 	mux.Handle("GET /session/{id}/status", h.auth(h.status))
@@ -65,13 +65,20 @@ func NewHandler(m Manager, st *store.Store, cs *claim.State, log *slog.Logger, v
 	return mux
 }
 
-func (h *handler) auth(next http.HandlerFunc) http.Handler {
+func (h *handler) auth(next http.HandlerFunc) http.Handler { return h.gate(next, h.cs.Authorized) }
+
+// authCurrent refuses the rotation grace key: for routes that change the relay's identity.
+func (h *handler) authCurrent(next http.HandlerFunc) http.Handler {
+	return h.gate(next, h.cs.AuthorizedCurrent)
+}
+
+func (h *handler) gate(next http.HandlerFunc, allowed func(key string) bool) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if h.cs.Mode() == claim.ModeUnclaimed {
 			writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "unclaimed"})
 			return
 		}
-		if !h.cs.Authorized(r.Header.Get("x-api-key")) {
+		if !allowed(r.Header.Get("x-api-key")) {
 			writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid api key"})
 			return
 		}
@@ -115,6 +122,16 @@ func (h *handler) rotate(w http.ResponseWriter, r *http.Request) {
 	if !decodeBody(w, r, &b, false) {
 		return
 	}
+	// Only the current key may rotate. The grace key may repeat a rotation
+	// that already took effect (Frappe lost the 200): same key, nothing to do.
+	if !h.cs.AuthorizedCurrent(r.Header.Get("x-api-key")) {
+		if h.cs.AuthorizedCurrent(b.APIKey) {
+			writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+			return
+		}
+		writeJSON(w, http.StatusUnauthorized, map[string]any{"error": "invalid api key"})
+		return
+	}
 	if !h.claimChange(w, r, h.cs.Rotate(r.Context(), b.APIKey)) {
 		return
 	}
@@ -144,6 +161,8 @@ func (h *handler) claimChange(w http.ResponseWriter, r *http.Request, err error)
 		return true
 	case errors.Is(err, claim.ErrEnvMode):
 		writeError(w, http.StatusConflict, "env_mode", err.Error())
+	case errors.Is(err, claim.ErrUnclaimed):
+		writeJSON(w, http.StatusServiceUnavailable, map[string]any{"error": "unclaimed"})
 	case errors.Is(err, claim.ErrBadRequest):
 		writeError(w, http.StatusBadRequest, "bad_request", err.Error())
 	default:
@@ -163,7 +182,12 @@ func (h *handler) info(w http.ResponseWriter, r *http.Request) {
 			h.fail(w, r, err)
 			return
 		}
-		connected, total := h.m.Counts()
+		total, err := h.st.CountLinkedAccounts(r.Context())
+		if err != nil {
+			h.fail(w, r, err)
+			return
+		}
+		connected := h.m.Connected()
 		callbackURL, siteName := h.cs.Info()
 		out["sessions"] = map[string]int{"connected": connected, "total": total}
 		out["outbox"] = map[string]int{"pending": pending, "dead": dead}

@@ -37,7 +37,7 @@ func (f *fakeManager) PairCode(_ context.Context, _, _ string, proxy *string) (s
 	f.pairProxy = proxy
 	return "ABCD-1234", f.pairErr
 }
-func (f *fakeManager) Counts() (int, int)                     { return 1, 2 }
+func (f *fakeManager) Connected() int                         { return 1 }
 func (f *fakeManager) Status(string) (string, string, string) { return "connected", "1@s", "1" }
 func (f *fakeManager) Pause(context.Context, string) error    { return nil }
 func (f *fakeManager) Resume(context.Context, string, *string) (string, error) {

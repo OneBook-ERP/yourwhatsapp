@@ -373,3 +373,28 @@ func TestSetCallbackPersistsAndTargets(t *testing.T) {
 		}
 	}
 }
+
+func TestDoubleRotationKeepsOnlyLatestGrace(t *testing.T) {
+	now := fixedNow
+	cs, _ := claimedState(t, &now)
+	keyC := strings.Repeat("C", MinKeyLen)
+	ctx := context.Background()
+	if err := cs.Rotate(ctx, newKey); err != nil {
+		t.Fatal(err)
+	}
+	now = fixedNow.Add(3 * time.Minute)
+	if err := cs.Rotate(ctx, keyC); err != nil {
+		t.Fatal(err)
+	}
+	if cs.Authorized(goodKey) {
+		t.Fatal("A must be rejected as soon as C replaces B")
+	}
+	now = fixedNow.Add(3*time.Minute + RotationGrace - time.Second)
+	if !cs.Authorized(newKey) || !cs.Authorized(keyC) {
+		t.Fatal("B (in its grace) and C must be valid")
+	}
+	now = fixedNow.Add(3*time.Minute + RotationGrace + time.Second)
+	if cs.Authorized(newKey) || !cs.Authorized(keyC) {
+		t.Fatal("B must expire after its own grace; C stays")
+	}
+}
