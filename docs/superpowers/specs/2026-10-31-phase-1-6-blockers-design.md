@@ -76,6 +76,8 @@ New table `relay_config` (single row): `api_key` (plaintext, see Key storage), `
   - `relay_bootstrap_token`: new optional Password field.
   - New read-only `relay_status` HTML panel (rendered client-side).
 - **Never lose the key (decided):** before calling the relay, Frappe stores the new key in a new Password field `relay_pending_key` and commits. On 200 it moves pending → `relay_api_key` and clears pending. Until then `_verify_relay_key` accepts either the current or the pending key, so callbacks signed with the new key aren't rejected mid-rotation. A leftover pending key is shown in the panel with a **Retry** of the same claim/rotate.
+  - Retry, and any refusal, first probes `GET /info` with the pending key. A key the relay accepts is promoted. Pending is cleared only on a definite rejection: a 401, or a 2xx without `sessions`. A timeout or 5xx keeps it.
+  - Starting a key change holds a MariaDB named lock (`GET_LOCK`) from the pending check through the commit, so the claim UI requires MariaDB.
 - **Env mode (decided):** Connect Relay first calls `GET /info`. If `mode` is `env`, it explains that this relay's key comes from `RELAY_API_KEY` and must be typed into the field by hand (the field stays editable for that case only).
 - **Buttons (System Manager only):**
   - **Connect Relay:** generate the key with `secrets.token_urlsafe(32)`, then POST `/claim` with key, callback URL, `frappe.local.site` and the bootstrap token. On 200, save the key. On 409 `already_claimed`, show "This relay is already claimed. If it's yours, use Rotate Key with the current key, or reset the relay's volume."

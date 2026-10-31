@@ -373,7 +373,53 @@ class TestWhatsAppSettingsRelay(IntegrationTestCase):
 		info_keys = [c["headers"].get("x-api-key") for c in relay.calls if c["route"] == ("GET", "/info")]
 		self.assertEqual(info_keys, [relay.current])
 
+	def _refused_rotate_then_probe(self, probe_answer):
+		# The rotate is refused and the follow-up /info probe can't tell whether
+		# the relay took the pending key: the pending key must survive.
+		self._set_keys(current=OLD_KEY)
+		relay = self._use(
+			FakeRelay(
+				mode="claimed",
+				current=OLD_KEY,
+				fail={
+					("POST", "/claim/rotate"): _response(401, {"error": "invalid api key"}),
+					("GET", "/info"): probe_answer,
+				},
+			)
+		)
+
+		result = self._settings().rotate_key()
+
+		self.assertFalse(result["ok"])
+		self.assertIn("Retry", result["message"])
+		self.assertEqual(self._keys(), (OLD_KEY, relay.call("POST", "/claim/rotate")["json"]["api_key"]))
+
+	def test_refusal_then_probe_5xx_keeps_pending(self):
+		self._refused_rotate_then_probe(_response(500, {"error": "internal"}))
+
+	def test_refusal_then_probe_timeout_keeps_pending(self):
+		self._refused_rotate_then_probe(requests.exceptions.Timeout("timed out"))
+
 	# Retry
+
+	def test_retry_current_key_probe_unknown_keeps_pending(self):
+		self._set_keys(current=OLD_KEY, pending="n" * 43)
+		relay = FakeRelay(mode="claimed", current=OLD_KEY)
+
+		def info(headers, body):
+			if headers.get("x-api-key") == OLD_KEY:
+				return _response(500, {"error": "internal"})
+			return relay._info(headers.get("x-api-key"))
+
+		relay.fail[("GET", "/info")] = info
+		self._use(relay)
+
+		result = self._settings().retry_pending()
+
+		self.assertFalse(result["ok"])
+		self.assertNotEqual(result.get("state"), "keys_rejected")
+		self.assertNotIn(("POST", "/claim/rotate"), relay.routes())
+		self.assertEqual(self._keys(), (OLD_KEY, "n" * 43))
 
 	def test_retry_after_lost_claim_200_no_current_key_promotes(self):
 		relay = self._use(FakeRelay(lose={("POST", "/claim")}))

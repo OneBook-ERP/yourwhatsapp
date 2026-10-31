@@ -65,4 +65,5 @@ Callbacks into Frappe (`yourwhatsapp.api`): `update_qr`, `inbound_message`, `mes
 - A proxy change (set or cleared in Frappe) applies when the relay next builds the account's client. `start` on a running session ignores it, so Pause, then Resume, a connected account to apply it.
 - Never run two relays against the same data dir or the same linked number: WhatsApp replaces the stream and the two fight.
 - `relay.db` holds the device keys. Anyone with a copy can act as the linked number: treat it and its backups like credentials, and never expose the relay port to the internet.
+- The Frappe side of claiming (WhatsApp Settings → Relay → Connect / Rotate / Retry) serialises key changes with a MariaDB named lock (`GET_LOCK`), so it requires a MariaDB-backed site.
 - Logs are JSON on stdout with `session_id` on per-account lines. Message bodies, media, QR codes and keys are never logged.

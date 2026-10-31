@@ -27,6 +27,11 @@ KEYS_REJECTED = (
 	"The relay rejects both the current and the pending key. The pending key is kept. "
 	"If this relay is yours, reset the relay's volume and use Retry."
 )
+PROBE_UNKNOWN = (
+	"The relay did not answer clearly whether it already uses the pending key. "
+	"The pending key is kept: use Retry."
+)
+ACCEPTED, REJECTED, UNKNOWN = "accepted", "rejected", "unknown"
 # Answers that prove the relay refused this request, once /info confirms it
 # doesn't take the pending key either.
 REFUSALS = {
@@ -77,8 +82,11 @@ class WhatsAppSettings(Document):
 		if not info.get("claimed"):
 			return self._claim(pending)
 		current = self._current_key()
-		if current and self._accepts(current):
+		accepted = self._accepts(current) if current else REJECTED
+		if accepted is ACCEPTED:
 			return self._rotate(current, pending)
+		if accepted is UNKNOWN:
+			return _failed(PROBE_UNKNOWN, self._known_keys())
 		return {"ok": False, "state": "keys_rejected", "message": KEYS_REJECTED}
 
 	@frappe.whitelist(methods=["POST"])
@@ -153,9 +161,12 @@ class WhatsAppSettings(Document):
 		if response.status_code >= 500:
 			# Outcome unknown (or the relay lost its claim): keep the key for Retry.
 			return _failed(_relay_error(response) + " " + _("Use Retry."), secrets_shown)
-		if self._accepts(key):
+		accepted = self._accepts(key)
+		if accepted is ACCEPTED:
 			# Refused now, but an earlier attempt already landed.
 			return self._promote_pending(key)
+		if accepted is UNKNOWN:
+			return _failed(PROBE_UNKNOWN, secrets_shown)
 		write_password("relay_pending_key", None)
 		return _failed(REFUSALS.get(_error_code(response)) or _relay_error(response), secrets_shown)
 
@@ -165,11 +176,19 @@ class WhatsAppSettings(Document):
 		return {"ok": True, "message": _("The relay uses the new key; it is saved.")}
 
 	def _accepts(self, key):
-		"""Whether the relay authorizes this key: /info shows the keyed detail only then."""
+		"""ACCEPTED, REJECTED or UNKNOWN: /info shows the keyed detail only for an accepted key.
+
+		Only a definite answer counts as REJECTED (a 401, or a 2xx without the
+		detail); a timeout, reset or 5xx says nothing about the key."""
 		try:
-			return _authorized(self._relay_info(key))
+			response = self._request("GET", "/info", key=key)
 		except requests.exceptions.RequestException:
-			return False
+			return UNKNOWN
+		if response.status_code == 401:
+			return REJECTED
+		if not _ok(response):
+			return UNKNOWN
+		return ACCEPTED if _authorized(_json(response)) else REJECTED
 
 	def _relay_info(self, key=None):
 		response = self._request("GET", "/info", key=key)
