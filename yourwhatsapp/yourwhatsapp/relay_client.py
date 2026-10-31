@@ -120,7 +120,7 @@ def _switch_account(doc, reason: str, relay_unavailable: bool = False, append: b
 	"""Move the message to an account not yet tried. When none is left it is
 	parked for a later retry if the relay itself was unavailable, else Failed
 	with `reason` (appended to the relay's own reason when `append`)."""
-	next_account = pick_account(exclude=_attempted_accounts(doc))
+	next_account = pick_account(exclude=_attempted_accounts(doc), recipient=doc.to)
 	if next_account:
 		doc.db_set("whatsapp_account", next_account)
 		return True

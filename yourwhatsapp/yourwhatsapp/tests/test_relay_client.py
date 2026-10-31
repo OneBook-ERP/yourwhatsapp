@@ -178,6 +178,16 @@ class TestRelayClient(IntegrationTestCase):
 		self.assertEqual(row.status, "Failed")
 		self.assertIn("no other WhatsApp Account", row.error_reason)
 
+	def test_failover_skips_recipients_own_account(self):
+		frappe.db.set_value("WhatsApp Account", self.account_b.name, "status", "Disconnected")
+		self._make_account("Client Recipient", phone_number="+1 555 123 4567")
+		msg = self._make_message(to="15551234567")
+		post = self._send(msg, relay_response(429, {"error": "temp_banned"}))
+		self.assertEqual(post.call_count, 1)
+		row = self._row(msg.name)
+		self.assertEqual(row.status, "Failed")
+		self.assertIn("no other WhatsApp Account", row.error_reason)
+
 	def _retry_row(self, name):
 		return frappe.db.get_value(
 			"WhatsApp Message", name, ["relay_retry_count", "next_retry_at", "attempted_accounts"], as_dict=True

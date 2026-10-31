@@ -1,3 +1,4 @@
+import re
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
@@ -16,7 +17,23 @@ def get_eligible_accounts(exclude=None):
 	return [a for a in accounts if a.name not in exclude and a.daily_message_count < a.daily_limit]
 
 
-def pick_account(exclude=None):
+def normalize_number(number: str | None) -> str:
+	"""Digits only: '+91 (95663) 72605' -> '919566372605'. LIDs are digits already."""
+	return re.sub(r"\D", "", number or "")
+
+
+def accounts_with_number(number: str | None) -> list[str]:
+	"""Accounts whose own linked number is `number` (compared as digits)."""
+	digits = normalize_number(number)
+	if not digits:
+		return []
+	accounts = frappe.get_all("WhatsApp Account", fields=["name", "phone_number"])
+	return [a.name for a in accounts if normalize_number(a.phone_number) == digits]
+
+
+def pick_account(exclude=None, recipient=None):
+	"""Rotate over eligible accounts; never the recipient's own linked number."""
+	exclude = [*(exclude or []), *accounts_with_number(recipient)]
 	eligible = get_eligible_accounts(exclude=exclude)
 	if not eligible:
 		return None
