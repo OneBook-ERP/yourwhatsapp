@@ -40,19 +40,44 @@
             "description": "e.g. http://localhost:8800"
         },
         {
+            "fieldname": "relay_reachable_frappe_url",
+            "fieldtype": "Data",
+            "label": "Callback URL (Frappe as reachable from the relay)",
+            "description": "Where the relay sends incoming messages and status updates. Leave empty to use this site's URL. In Docker, use the internal URL, e.g. http://frontend:8080; on a dev bench, http://127.0.0.1:<port> (.localhost names may not resolve from the relay)."
+        },
+        {
             "fieldname": "column_break_relay",
             "fieldtype": "Column Break"
         },
         {
             "fieldname": "relay_api_key",
             "fieldtype": "Password",
-            "label": "Relay API Key"
+            "label": "Relay API Key",
+            "description": "Set by Connect Relay / Rotate Key. Typed by hand only for a relay whose key comes from its RELAY_API_KEY environment variable."
         },
         {
-            "fieldname": "relay_reachable_frappe_url",
-            "fieldtype": "Data",
-            "label": "Frappe URL (reachable from relay)",
-            "description": "Base URL of this Frappe site as reachable FROM the relay process — not necessarily the same as the site's public URL. E.g. custom .localhost domains often don't resolve from Node's DNS resolver even though they work in a browser; use http://127.0.0.1:<port> instead in that case."
+            "fieldname": "relay_bootstrap_token",
+            "fieldtype": "Password",
+            "label": "Relay Bootstrap Token",
+            "description": "Only if the relay sets RELAY_BOOTSTRAP_TOKEN: sent with Connect Relay."
+        },
+        {
+            "fieldname": "relay_pending_key",
+            "fieldtype": "Password",
+            "label": "Relay Pending Key",
+            "hidden": 1,
+            "read_only": 1,
+            "description": "A new key sent to the relay whose answer was not confirmed yet; Retry finishes the change."
+        },
+        {
+            "fieldname": "section_break_relay_status",
+            "fieldtype": "Section Break",
+            "label": "Relay Status"
+        },
+        {
+            "fieldname": "relay_status_html",
+            "fieldtype": "HTML",
+            "label": "Relay Status"
         }
     ],
     "permissions": [

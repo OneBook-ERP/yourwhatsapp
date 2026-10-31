@@ -12,9 +12,19 @@ FAILOVER_METHOD = "yourwhatsapp.yourwhatsapp.relay_client.handle_async_failure"
 
 
 def _verify_relay_key():
-	expected = frappe.get_single("WhatsApp Settings").get_password("relay_api_key")
-	provided = frappe.get_request_header("X-Api-Key")
-	if not expected or not provided or not hmac.compare_digest(provided.encode(), expected.encode()):
+	# The pending key counts too: mid-rotation the relay may already sign
+	# callbacks with the new key before this site has seen its 200.
+	settings = frappe.get_single("WhatsApp Settings")
+	provided = (frappe.get_request_header("X-Api-Key") or "").encode()
+	matches = [
+		hmac.compare_digest(provided, key.encode())
+		for key in (
+			settings.get_password("relay_api_key", raise_exception=False),
+			settings.get_password("relay_pending_key", raise_exception=False),
+		)
+		if key
+	]
+	if not provided or not any(matches):
 		frappe.throw("Invalid relay API key", frappe.PermissionError)
 
 
