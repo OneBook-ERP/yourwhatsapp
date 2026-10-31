@@ -12,6 +12,7 @@ from yourwhatsapp.yourwhatsapp.routing import (
 	pick_account,
 	to_system_datetime,
 )
+from yourwhatsapp.yourwhatsapp.templating import UnresolvedPlaceholders, render
 
 DISPATCH_BUDGET_SECONDS = 240
 TIMEOUT = 30  # the relay only queues the send, so a slow answer means trouble
@@ -67,15 +68,12 @@ class RelayNotConfigured(Exception):
 
 
 def _render_message(doc):
+	"""Raises UnresolvedPlaceholders rather than send a literal {{n}}."""
 	if not doc.use_template or not doc.template:
 		return doc.message
 
-	template_doc = frappe.get_doc("WhatsApp Templates", doc.template)
-	text = template_doc.template
-	if doc.template_parameters:
-		for i, param in enumerate(json.loads(doc.template_parameters), start=1):
-			text = text.replace("{{" + str(i) + "}}", str(param))
-	return text
+	text = frappe.db.get_value("WhatsApp Templates", doc.template, "template")
+	return render(text, json.loads(doc.template_parameters or "[]"))
 
 
 def send_message(message_name: str):
@@ -181,14 +179,14 @@ def _to_is_lid(doc) -> bool:
 	)
 
 
-def _post(doc, account, base_url: str, api_key: str):
+def _post(doc, account, base_url: str, api_key: str, message: str):
 	"""POST to the relay; a timeout is retried once on the same account (relay idempotency answers `duplicate`)."""
 	payload = {
 		"session_id": account.session_id,
 		"to": doc.to,
 		"to_is_lid": _to_is_lid(doc),
 		"content_type": doc.content_type,
-		"message": _render_message(doc),
+		"message": message,
 		"local_message_id": doc.name,
 		**_attach_payload(doc),
 	}
@@ -230,6 +228,11 @@ def _ban_expiry(response):
 def _dispatch(doc):
 	started = time.monotonic()
 	try:
+		message = _render_message(doc)
+	except UnresolvedPlaceholders:
+		_fail(doc, "unresolved template placeholders")
+		return
+	try:
 		base_url, api_key = relay_settings()
 	except RelayNotConfigured as e:
 		_fail(doc, str(e))
@@ -251,7 +254,7 @@ def _dispatch(doc):
 		_remember_attempt(doc, account.name)
 
 		try:
-			response = _post(doc, account, base_url, api_key)
+			response = _post(doc, account, base_url, api_key, message)
 		except requests.exceptions.RequestException as e:
 			previous_account = account.name
 			if not _switch_account(doc, f"Relay unreachable: {e}", relay_unavailable):

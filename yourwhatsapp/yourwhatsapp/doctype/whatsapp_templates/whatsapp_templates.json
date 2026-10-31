@@ -45,6 +45,13 @@
             "description": "Use {{1}}, {{2}}, ... as placeholders"
         },
         {
+            "fieldname": "parameters",
+            "fieldtype": "Table",
+            "label": "Parameters",
+            "options": "WhatsApp Template Parameter",
+            "description": "Where each {{n}} gets its value from the message's reference document"
+        },
+        {
             "fieldname": "footer",
             "fieldtype": "Data",
             "label": "Footer"

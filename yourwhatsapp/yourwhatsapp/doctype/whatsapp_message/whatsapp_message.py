@@ -1,8 +1,11 @@
+import json
+
 import frappe
 from frappe import _
 from frappe.model.document import Document
 
 from yourwhatsapp.yourwhatsapp.routing import normalize_number, pick_account
+from yourwhatsapp.yourwhatsapp.templating import resolve
 
 MEDIA_CONTENT_TYPES = ("image", "video", "audio", "document")
 
@@ -15,6 +18,9 @@ class WhatsAppMessage(Document):
 			# customer's number, whichever of our accounts carried the message.
 			self.to = normalize_number(self.to) or self.to
 			self.message_type = "Template" if self.use_template else "Manual"
+			# Before resolution: a template reads from the matched Lead/Deal.
+			self._link_crm_reference()
+			self._fill_template_parameters()
 			if not self.whatsapp_account:
 				self.whatsapp_account = pick_account(recipient=self.to)
 			self.status = "Queued"
@@ -24,6 +30,13 @@ class WhatsAppMessage(Document):
 
 	def validate(self):
 		self._link_crm_reference()
+
+	def _fill_template_parameters(self):
+		if not (self.use_template and self.template) or self.template_parameters:
+			return
+		values = resolve(self.template, self.reference_doctype, self.reference_name)
+		if values:
+			self.template_parameters = json.dumps(values)
 
 	def _link_crm_reference(self):
 		"""Link the customer's CRM Lead/Deal/Contact from the stored digits.

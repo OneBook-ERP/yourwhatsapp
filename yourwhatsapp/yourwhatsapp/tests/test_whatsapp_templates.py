@@ -10,7 +10,13 @@ class TestWhatsAppTemplates(IntegrationTestCase):
 
 	def _template(self, name, **fields):
 		return frappe.get_doc(
-			{"doctype": "WhatsApp Templates", "template_name": name, "template": "Hello {{1}}", **fields}
+			{
+				"doctype": "WhatsApp Templates",
+				"template_name": name,
+				"template": "Hello {{1}}",
+				"parameters": [{"placeholder": 1, "field": "name"}],
+				**fields,
+			}
 		).insert(ignore_permissions=True)
 
 	def _crm_picker(self, doctype):
