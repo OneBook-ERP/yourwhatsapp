@@ -254,3 +254,19 @@ func TestIsDirectChat(t *testing.T) {
 		t.Fatal("IsDirectChat")
 	}
 }
+
+func TestInboundLIDIgnoresRecipientAlt(t *testing.T) {
+	e := msgEvt(lid("999"), &waE2E.Message{Conversation: proto.String("hi")})
+	e.Info.RecipientAlt = pn("919000000000")
+	p, _, ok := Inbound("s1", e, noResolve)
+	if !ok || p.FromNumber != "999" || !p.FromLID {
+		t.Fatalf("ok=%v %+v", ok, p)
+	}
+}
+
+func TestInboundLIDNilResolver(t *testing.T) {
+	p, _, ok := Inbound("s1", msgEvt(lid("999"), &waE2E.Message{Conversation: proto.String("hi")}), nil)
+	if !ok || p.FromNumber != "999" || !p.FromLID {
+		t.Fatalf("ok=%v %+v", ok, p)
+	}
+}

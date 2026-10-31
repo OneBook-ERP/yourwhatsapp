@@ -75,10 +75,9 @@ func senderNumber(evt *events.Message, resolvePN func(types.JID) (types.JID, boo
 	if chat.Server != types.HiddenUserServer {
 		return chat.User, false
 	}
-	for _, alt := range []types.JID{evt.Info.SenderAlt, evt.Info.RecipientAlt} {
-		if alt.Server == types.DefaultUserServer && alt.User != "" {
-			return alt.User, false
-		}
+	// RecipientAlt is our own side of the chat, so only SenderAlt is trusted.
+	if alt := evt.Info.SenderAlt; alt.Server == types.DefaultUserServer && alt.User != "" {
+		return alt.User, false
 	}
 	if resolvePN != nil {
 		if pn, found := resolvePN(chat); found && pn.Server == types.DefaultUserServer && pn.User != "" {
