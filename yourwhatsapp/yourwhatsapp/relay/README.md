@@ -36,6 +36,7 @@ RELAY_API_KEY=<key> FRAPPE_BASE_URL=http://127.0.0.1:8001 RELAY_PORT=8800 \
 | `RELAY_PORT` | `8800` | Listen port (named `RELAY_PORT`, not `PORT`, which collides). |
 | `RELAY_DATA_DIR` | `./data` | Holds `relay.db`. Back it up. |
 | `SEND_DELAY_MIN` / `SEND_DELAY_MAX` | `4s` / `12s` | Per-account random delay between outgoing messages (Go durations). |
+| `MEDIA_MAX_BYTES` | `15728640` (15 MiB) | Largest inbound attachment the relay downloads and forwards. Bigger media arrives as text with an `[attachment too large: <name or type>, <n> MB]` note. Keep it at or below Frappe's max file size. |
 
 ## Routes
 
@@ -44,13 +45,13 @@ Every route except `/health` needs the `x-api-key` header. Responses are JSON.
 | Method & path | Notes |
 |---|---|
 | `GET /health` | `{"ok":true}`. No auth. |
-| `POST /session/:id/start` | Optional `{"proxy": ...}`. Creates the account if new; connects if paired, otherwise starts the QR flow. Idempotent. |
+| `POST /session/:id/start` | Optional `{"proxy": ...}` (`""` clears the stored proxy, absent/`null` keeps it). Creates the account if new; connects if paired, otherwise starts the QR flow. Idempotent: on a connected session it returns `connected` and pushes `Active` to Frappe again. |
 | `POST /session/:id/pair-code` | `{"phone": "+91 98765 43210"}` returns `{"code": "ABCD-1234"}`. Session must be unpaired. |
 | `GET /session/:id/status` | `{"status", "jid", "phone"}` |
 | `POST /session/:id/pause` | Disconnect and do not restore on boot. |
-| `POST /session/:id/resume` | Optional `{"proxy": ...}`. |
-| `POST /session/:id/logout` | Unlink the device from WhatsApp and delete its keys. |
-| `POST /message/send` | `local_message_id` required. Asynchronous: **202** `{"state":"queued"}`; the result arrives later as a `message_status` callback. Errors: 400 `bad_request`, 422 `invalid_number`, 409 `session_unavailable`, 429 `temp_banned`; 200 `duplicate` for an already queued or sent id. |
+| `POST /session/:id/resume` | Optional `{"proxy": ...}`. Returns `{"ok": true, "status": ...}`. |
+| `POST /session/:id/logout` | Unlink the device from WhatsApp, delete its keys and clear the pause. |
+| `POST /message/send` | `local_message_id` required. Asynchronous: **202** `{"state":"queued"}`; the result arrives later as a `message_status` callback. Errors: 400 `bad_request`, 422 `invalid_number`, 409 `session_unavailable`, 429 `temp_banned`; 200 `duplicate` for an already queued or sent id. Asynchronous failures carry `send_failed`, `session_unavailable`, `temp_banned`, or `send_unconfirmed` (the send errored after the message went out, so it may have been delivered; it carries `message_id` and is not failed over). |
 
 Status values: `not_started`, `qr_pending`, `pairing`, `connecting`, `connected`, `disconnected`, `logged_out`, `paused`, `temp_banned`.
 
@@ -60,7 +61,8 @@ Callbacks into Frappe (`yourwhatsapp.api`): `update_qr`, `inbound_message`, `mes
 
 - Only 1:1 chats (`@c.us` / `@lid`) are relayed. Status updates, groups, broadcast lists and channels are dropped.
 - Attachments are base64 in the request body (limit 25 MB); the relay never fetches URLs.
-- Sessions are restored from `relay.db` on boot, so a restart does not need re-scanning.
+- Sessions are restored from `relay.db` on boot, so a restart does not need re-scanning. Sends that were still queued when the relay stopped are reported Failed 30 s after it is listening again, so Frappe fails them over once the sessions have reconnected.
+- A proxy change (set or cleared in Frappe) applies when the relay next builds the account's client. `start` on a running session ignores it, so Pause, then Resume, a connected account to apply it.
 - Never run two relays against the same data dir or the same linked number: WhatsApp replaces the stream and the two fight.
 - `relay.db` holds the device keys. Anyone with a copy can act as the linked number: treat it and its backups like credentials, and never expose the relay port to the internet.
 - Logs are JSON on stdout with `session_id` on per-account lines. Message bodies, media, QR codes and keys are never logged.

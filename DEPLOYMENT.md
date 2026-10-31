@@ -47,6 +47,7 @@ docker compose -f compose.yaml -f overrides/compose.mariadb.yaml -f overrides/co
 - No ports are published. Only containers on the compose network (your Frappe services) reach the relay. Never expose port 8800 to the internet: with the key, anyone can send messages as your numbers.
 - `stop_grace_period: 30s` lets the relay close WhatsApp sessions cleanly. Do not shorten it, and avoid `docker kill` on a live relay: repeated abrupt disconnects can get a device unlinked.
 - Run exactly one relay per data volume.
+- `MEDIA_MAX_BYTES` (default 15 MiB) caps inbound attachments; bigger ones arrive as a text note. Keep it at or below the site's max file size (System Settings), or Frappe stores the message with an "[attachment could not be saved]" note instead.
 - The relay runs as uid 65532 (distroless nonroot). A fresh named volume inherits the right ownership from the image; a bind mount or a pre-existing volume needs a host-side `chown -R 65532:65532 <path>` or the relay cannot open `relay.db` and crashes on start.
 
 ## 4. WhatsApp Settings
@@ -59,6 +60,8 @@ In Frappe desk open **WhatsApp Settings** and set:
 ## 5. Link numbers
 
 Create a **WhatsApp Account** per number, then click **Connect / Generate QR** and scan from WhatsApp, Linked Devices, Link a device. Alternatively use the pairing-code option on the account form, enter the phone number, and type the code into the phone (Linked Devices, Link with phone number instead). Sessions are stored in the volume and restored on restart: no re-scan needed.
+
+Proxy: set **Proxy** on the account before connecting. Changing or clearing it later applies only on the next connect: click **Pause**, then **Resume**.
 
 Migrating from the old Node relay: every account must be relinked once, because the Node relay's sessions cannot be reused. Unlink the old "Chrome" linked device on each phone first to free a slot (WhatsApp allows a limited number of linked devices).
 

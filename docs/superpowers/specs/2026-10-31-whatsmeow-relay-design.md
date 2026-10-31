@@ -90,12 +90,12 @@ Every route except `/health` needs `x-api-key`, compared in constant time. All r
 | Method & path | Body / response | Notes |
 |---|---|---|
 | `GET /health` | `{"ok":true}` | No auth, no data. Used by the Docker healthcheck. |
-| `POST /session/:id/start` | `{"proxy": ...}` (optional) → `{"status": ...}` | Creates the account row if new. If paired, connects. If not paired, starts the QR flow. Idempotent: calling it on a running session returns its status. **Must work after a disconnect or logout** (fixes the stale-map bug). |
+| `POST /session/:id/start` | `{"proxy": ...}` (optional) → `{"status": ...}` | Creates the account row if new. If paired, connects. If not paired, starts the QR flow. Idempotent: calling it on a running session returns its status; on a `connected` one it also re-sends `update_qr(status="Active")`, so Frappe can't stay out of sync. **Must work after a disconnect or logout** (fixes the stale-map bug). |
 | `POST /session/:id/pair-code` | `{"phone":"+91 98765 43210"}` → `{"code":"ABCD-1234"}` | Phone-number pairing. Session must be unpaired. |
 | `GET /session/:id/status` | → `{"status", "jid", "phone"}` | |
 | `POST /session/:id/pause` | | Disconnects the client and sets `paused=1`; not restored on boot. |
-| `POST /session/:id/resume` | `{"proxy": ...}` (optional) | Sets `paused=0` and connects. |
-| `POST /session/:id/logout` | | Unlinks the device from WhatsApp, deletes the device store, keeps the account row with `jid=NULL`. |
+| `POST /session/:id/resume` | `{"proxy": ...}` (optional) → `{"ok": true, "status": ...}` | Sets `paused=0` and connects (same `connected` re-push as `start`). |
+| `POST /session/:id/logout` | | Unlinks the device from WhatsApp, deletes the device store, keeps the account row with `jid=NULL` and clears `paused`. |
 | `POST /message/send` | Same body as today (`session_id`, `to`, `content_type`, `message`, `local_message_id` (now **required**), `attach_base64`, `attach_mimetype`, `attach_filename`) plus optional `to_is_lid` (bool) → **202** `{"state":"queued"}` | **Asynchronous.** Section 8.3. The final result (`Sent` with `message_id`, or `Failed` with an error code) arrives later through the `message_status` callback. |
 
 `status` values (relay-internal): `not_started`, `qr_pending`, `pairing`, `connecting`, `connected`, `disconnected`, `logged_out`, `paused`, `temp_banned`.
@@ -108,7 +108,8 @@ Every route except `/health` needs `x-api-key`, compared in constant time. All r
 | 422 | `invalid_number` | Number not on WhatsApp, or unparseable | `Failed`, no failover |
 | 409 | `session_unavailable` | Not connected, paused, logged out, or queue full | Fail over to the next account |
 | 429 | `temp_banned` | WhatsApp temporary ban (`detail` includes the expiry) | Account → `RateLimited`, then fail over |
-| — (async only) | `send_failed` | whatsmeow returned an error while sending | Fail over (enqueued job) |
+| — (async only) | `send_failed` | whatsmeow returned an error before the message went out | Fail over (enqueued job) |
+| — (async only) | `send_unconfirmed` | whatsmeow returned an error that can come **after** the message node was written (ack timeout, context deadline/cancel, disconnect during the retried frame), so it may have been delivered. The callback carries the pre-generated `message_id`. | `Failed`, **no failover** (it would risk a duplicate); `message_id` is stored so a later `Delivered`/`Read` receipt lifts the status |
 | 202 | — | Accepted and queued | `Queued` stays; wait for the callback |
 | 200 | `duplicate` | `local_message_id` is already `queued` or `sent` **on any session**; `state` and `message_id` are returned and nothing is queued | No-op |
 
@@ -132,7 +133,7 @@ A `local_message_id` whose earlier attempt ended `failed` can be accepted again 
   - The relay never resumes a session that Frappe paused: pause and resume always go Frappe → relay.
   - In Frappe, a relay `Active` / `Disconnected` event is **ignored when the account is `Paused`**.
   - A relay `Active` event clears `RateLimited` only if `rate_limited_until` is set and has passed (relay-originated ban). A manually set `RateLimited` (no `rate_limited_until`) stays until an admin changes it.
-- **Proxy:** Frappe's `WhatsApp Account.proxy` is the source of truth. It's sent with every `start` / `resume` (as JSON `{"proxy": ...}`) and the relay stores a copy only so it can restore sessions on boot.
+- **Proxy:** Frappe's `WhatsApp Account.proxy` is the source of truth. It's sent with every `start` / `resume` / `pair-code` (as JSON `{"proxy": ...}`, `""` when unset so the relay clears its copy; absent/`null` keeps it) and the relay stores a copy only so it can restore sessions on boot. A change applies when the relay next builds the client: `start` on a running session ignores it, so Pause → Resume applies it.
 - **On SIGTERM/SIGINT:** stop accepting HTTP, then for each client stop its send queue, wait up to 10 s for any in-flight send, call `Disconnect()`, then exit. Target: finished within 25 s (compose `stop_grace_period: 30s`).
 
 ### 8.3 Sending
@@ -146,7 +147,7 @@ The HTTP call returns as soon as the message is accepted. The Frappe worker neve
    - Otherwise reject fewer than 8 or more than 15 digits (`invalid_number`).
 4. **Check the number** (not for LIDs): `IsOnWhatsApp(["+"+digits])`. If it isn't registered → `invalid_number`. Use the returned JID as the target. Cache positive results for 24 h in memory.
 5. **Queue capacity:** if the account's queue already holds 50 items → `session_unavailable`.
-6. **Reserve:** insert or overwrite the `sends` row as `queued` for this session, **then** enqueue the job, then return 202. The media bytes stay in memory with the job. A relay restart loses queued jobs; on boot, every `sends` row still `queued` is marked `failed` with `send_failed`, and a `message_status` Failed callback goes out, so Frappe fails over.
+6. **Reserve:** insert or overwrite the `sends` row as `queued` for this session, **then** enqueue the job, then return 202. The media bytes stay in memory with the job. A relay restart loses queued jobs; on boot the relay records every `sends` row still `queued`, restores the sessions at once, and **30 s after the HTTP server is listening** marks those rows `failed` with `send_failed` and sends a `message_status` Failed callback for each, so Frappe fails over once the sessions have had time to reconnect. Rows accepted after boot are never touched; a shutdown before the grace leaves the rows queued for the next boot.
 
 **Asynchronous part (per-account worker):**
 4. **Queue:** each account has its own FIFO queue and worker goroutine. Before each send, wait a random time in `[SEND_DELAY_MIN, SEND_DELAY_MAX]` since that account's previous send (env, defaults 4 s and 12 s; `0/0` allowed for dev). If the session isn't connected when a job comes up, mark it `failed` with `session_unavailable`; if the session is in a temporary ban, mark it `failed` with `temp_banned`.
@@ -154,20 +155,21 @@ The HTTP call returns as soon as the message is accepted. The Frappe worker neve
 6. **Send:**
    - Text: `Conversation`.
    - Media: `Upload` (type from `content_type`), then `ImageMessage` / `VideoMessage` / `AudioMessage` / `DocumentMessage` with caption (document: file name plus caption). An unknown `content_type` with an attachment is sent as a document.
-   - Use the client's own message-id generator.
-7. **On success:** set `sends.state=sent` and `message_id`, then send the outbox callback `message_status(local_message_id, message_id, status="Sent")`. **On error:** set `failed` with `send_failed`, then send `message_status(local_message_id, status="Failed", error_code, error_reason)`. The `Sent` callback always goes into the outbox **before** any receipt for that id can arrive, because both go through the same ordered outbox.
+   - Use the client's own message-id generator, called **before** `SendMessage` and passed as `SendRequestExtra{ID}`, so the id is known even when the send errors.
+7. **On success:** set `sends.state=sent` and `message_id`, then send the outbox callback `message_status(local_message_id, message_id, status="Sent")`. **On error:** set `failed` with `send_failed`, then send `message_status(local_message_id, status="Failed", error_code, error_reason)`. **On an ambiguous error** (section 7, `send_unconfirmed`): set `failed` with `send_unconfirmed` **and** the `message_id`, then send `message_status(local_message_id, message_id, status="Failed", error_code="send_unconfirmed", error_reason="send not confirmed by WhatsApp; may have been delivered")`. The `Sent` callback always goes into the outbox **before** any receipt for that id can arrive, because both go through the same ordered outbox.
 
 ### 8.4 Receiving
-- Handle `*events.Message`. Drop the message if any of these is true: `IsFromMe`; chat server not in {`s.whatsapp.net`, `lid`}; it's a protocol, reaction or edit message with no user content. Reactions inbound are dropped in this spec (Phase 1.6 E).
+- Handle `*events.Message`. Drop the message if any of these is true: `IsFromMe`; chat server not in {`s.whatsapp.net`, `lid`}; it's a protocol, reaction or edit message with no user content; it carries only non-chat control content (poll votes, poll option adds, pin-in-chat, keep-in-chat, event RSVPs, secret-encrypted edits, history bundles/notices, key distribution). Reactions inbound are dropped in this spec (Phase 1.6 E). Genuinely unknown content still arrives as `[unsupported]`.
 - **Sender phone number:** if the chat JID is `@lid`, look it up in the store's LID map. If it resolves, use those digits. If not, send `from_number` as the raw LID digits **and** a new `from_lid=true` flag.
 - **Replies to unresolved LIDs:** in Frappe, `relay_client` sets `to_is_lid=true` when the latest incoming `WhatsApp Message` whose `from` equals `to` has `is_lid_sender=1`, so the relay sends straight to `<digits>@lid`. That avoids treating LID digits as a phone number (rejected, or worse, matched to a real, unrelated number). CRM still links on `from`; an unresolved LID won't match a Lead, which is accepted. Staff see the flag.
 - **Content type:** text (`Conversation` / `ExtendedTextMessage`), `image`, `video`, `audio`, `document`. Others become text with a short placeholder (e.g. `[sticker]`) so nothing disappears silently.
 - **Media:** `Download` the content, base64-encode it, and include mimetype and file name (documents use their file name; others are named `<message_id>.<ext>`). If the download fails, the message is still delivered without media and the error is logged.
+- **Media cap:** env `MEDIA_MAX_BYTES` (default 15728640). If the media's declared `FileLength` exceeds it, the download is skipped; if no length is declared and the downloaded bytes exceed it, they are discarded. Either way the message is delivered as `content_type=text`, no media fields, with text = caption (if any) + `"\n[attachment too large: <document file name or content type>, <size> MB]"`.
 - **Replies:** if `ContextInfo.StanzaID` is set, send `is_reply=true` and `reply_to_message_id`.
 - Send to the outbox as `inbound_message` with the same fields as today, plus `from_lid`.
 
 ### 8.5 Receipts
-- Handle `*events.Receipt` for one-to-one chats only. `Delivered` → `Delivered`, `Read` / `ReadSelf` → `Read`, `Played` → `Read`. Send one `message_status` per id.
+- Handle `*events.Receipt` for one-to-one chats only. `Delivered` → `Delivered`, `Read` → `Read`, `Played` → `Read`. Send one `message_status` per id. `ReadSelf` is ignored: it means our own other device read an *incoming* message.
 - **Frappe makes status monotonic** (section 9). The relay just reports.
 
 ### 8.6 Outbox
@@ -197,20 +199,22 @@ The HTTP call returns as soon as the message is accepted. The Frappe worker neve
   - Always send `local_message_id` and `to_is_lid`. On 202, leave the status `Queued`. On 200 `duplicate`, do nothing.
   - Branch on the **synchronous** error codes in section 7: `invalid_number` / `bad_request` → `Failed`, no failover; `temp_banned` → account `RateLimited`, then fail over; `session_unavailable` / connection error → fail over (existing path).
   - **Timeout** (unknown whether it was accepted): retry once on the **same** account. Idempotency returns `duplicate` if the first call did land.
-  - **Asynchronous failures:** `message_status` with `status="Failed"` and `error_code` in {`session_unavailable`, `send_failed`, `temp_banned`} enqueues a failover dispatch, excluding accounts already tried. Store the tried accounts in a new hidden field `attempted_accounts` (Small Text, JSON list) on `WhatsApp Message`. `invalid_number` → just `Failed`.
+  - **Relay unavailable:** if every account tried in one dispatch failed only with a connection error, timeout or 409 `session_unavailable` (none accepted, none answered 4xx/422/429), the relay itself is down or restarting. The message goes back to `Queued`, `attempted_accounts` is cleared, the new hidden Int `relay_retry_count` is incremented and the new hidden Datetime `next_retry_at` is set 1, 2, 5, 10, then 20 min out. Frappe v16's `frappe.enqueue` has no delay, so an every-minute scheduler job (`tasks.retry_relay_unavailable_messages`) re-dispatches messages that are `Queued` with `next_retry_at` due (clearing it first). After the fifth retry the message is `Failed` "relay unavailable …". The same applies when the dispatch budget runs out with only unavailable answers, and when an async failover's re-dispatch reaches no account.
+  - **Asynchronous failures:** `message_status` with `status="Failed"` and `error_code` in {`session_unavailable`, `send_failed`, `temp_banned`} enqueues a failover dispatch, excluding accounts already tried. Store the tried accounts in a new hidden field `attempted_accounts` (Small Text, JSON list) on `WhatsApp Message`. `invalid_number` and `send_unconfirmed` → just `Failed`. When no untried account is left, the failover reason is appended to the relay's `error_reason` rather than replacing it.
   - **`daily_message_count`:** incremented on the `Sent` callback, not on 202, using an atomic `UPDATE ... SET daily_message_count = daily_message_count + 1`.
 - **`api.py`:**
   - `message_status(message_id=None, status, error_reason=None, local_message_id=None, error_code=None)`:
-    - Look up by `local_message_id` (the `name`) if given, otherwise by `message_id`. On `Sent`, store `message_id`.
+    - Look up by `local_message_id` (the `name`) if given, otherwise by `message_id` among **Outgoing** messages only (an incoming message can carry the same id). On `Sent`, and on a `Failed` that carries one (`send_unconfirmed`), store `message_id`.
     - **Monotonic:** rank `Queued`=0, `Sent`=1, `Delivered`=2, `Read`=3 and ignore a lower rank. `Failed` applies only while status < `Sent`, and triggers the failover handling above.
     - Unknown ids stay a no-op.
   - `inbound_message`:
     - Accept `from_lid: bool`. When it's true, also set the new `WhatsApp Message.is_lid_sender` field so staff can see the number is unresolved.
     - **Dedupe:** if a `WhatsApp Message` with the same `message_id` and `type=Incoming` already exists, return the existing name.
+    - **Media:** saved inside a DB savepoint. If saving fails (e.g. `MaxFileSizeReachedError`), roll back to the savepoint, log the error, append `"[attachment could not be saved]"` to the message and keep the row.
   - **New** `account_event(session_id, event, until=None)`: `event="temp_banned"` sets the account to `RateLimited` and stores `rate_limited_until`.
   - `update_qr`: unchanged.
 - **Doctype changes** (with a migration patch where needed):
-  - `WhatsApp Message`: new Check `is_lid_sender` (read-only); new hidden Small Text `attempted_accounts`.
+  - `WhatsApp Message`: new Check `is_lid_sender` (read-only); new hidden Small Text `attempted_accounts`; new hidden Int `relay_retry_count` and Datetime `next_retry_at` (relay-unavailable retry); `message_id` gets a search index.
   - `WhatsApp Account`:
     - New Data `proxy`, sent to the relay on connect.
     - New Datetime `rate_limited_until` (read-only).
@@ -218,7 +222,9 @@ The HTTP call returns as soon as the message is accepted. The Frappe worker neve
   - **Account form buttons:**
     - **Connect** follows `pairing_method`. QR as today; Phone Number calls the new `pair_with_code()` method and shows the 8-character code in a dialog with instructions (Linked Devices → Link with phone number).
     - **Pause / Resume** and **Logout** call the matching relay routes, same role check as `connect()`.
+    - `connect()` reads the relay's `status`: `connected` → `Active` and `connected_at` (unless the account is `Paused` or held `RateLimited`); `paused` → error "Account is paused on the relay; use Resume". `resume()` stays relay-first: `connected` → `Active` and `connected_at`, otherwise `Disconnected`.
 - **Scheduler (every 5 min):** accounts in `RateLimited` whose `rate_limited_until` has passed go back to `Active`.
+- **Scheduler (every minute):** re-dispatch relay-unavailable messages whose `next_retry_at` is due (see `relay_client.py` above).
 - **Procfile:** `relay:` runs the Go binary (`apps/yourwhatsapp/yourwhatsapp/yourwhatsapp/relay/bin/relay`), built with `make build` in `relay/`.
 
 ## 10. Cutover
