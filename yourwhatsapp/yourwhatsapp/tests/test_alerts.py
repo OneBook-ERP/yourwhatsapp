@@ -253,6 +253,17 @@ class AlertsTestCase(LiveSafeTestCase):
 		self.assertEqual(len(self._emailed()), 1)
 		self.assertIn("client outdated", self._emailed()[0])
 
+	def test_resume_and_connect_clear_manual_silence(self):
+		account = self._relay_account(status="Paused")
+		for action in ("resume", "connect"):
+			with self.subTest(action=action):
+				self._change("Active", "Paused", reason="manual", account=account.name)
+				self.assertTrue(frappe.cache.get_value(alerts.alert_key(account.name, "manual")))
+				with patch.object(type(account), "_relay_post", return_value={}):
+					getattr(account, action)()
+				self._commit()
+				self.assertIsNone(frappe.cache.get_value(alerts.alert_key(account.name, "manual")))
+
 	def _reconcile(self, account):
 		# The relay is mocked as "connecting": reconcile leaves the status alone.
 		with patch("yourwhatsapp.yourwhatsapp.relay_client.relay_settings", return_value=("http://relay.test", "k")), \

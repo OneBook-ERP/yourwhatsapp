@@ -47,6 +47,11 @@ def account_status_changed(account: str, old: str | None, new: str, reason: str 
 		_safely(account, _send_down, account, new, reason)
 
 
+def clear_manual(account: str) -> None:
+	"""An admin reconnecting ends their own silence: the next outage alerts."""
+	_delete_after_commit(alert_key(account, "manual"))
+
+
 def report_down(account: str, status: str, reason: str) -> None:
 	"""A down alert for an account that was already down, when a reason worth
 	telling turns up (client outdated); skipped if this outage was alerted."""

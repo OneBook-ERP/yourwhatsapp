@@ -40,6 +40,7 @@ class WhatsAppAccount(Document):
 	def connect(self):
 		self._check_admin()
 		result = self._relay_post("start", self._proxy_body())
+		alerts.clear_manual(self.name)
 		status = result.get("status")
 		if status == "paused":
 			frappe.throw("Account is paused on the relay; use Resume")
@@ -69,6 +70,7 @@ class WhatsAppAccount(Document):
 	def resume(self):
 		self._check_admin()
 		result = self._relay_post("resume", self._proxy_body())
+		alerts.clear_manual(self.name)
 		# An admin resuming lifts their own Paused/ban hold, which the relay may not.
 		if frappe.db.get_value("WhatsApp Account", self.name, "status") in ADMIN_HOLDS:
 			set_account_status(self.name, "Disconnected")
