@@ -5,7 +5,7 @@ from frappe.model.document import Document
 from frappe.utils import random_string
 
 from yourwhatsapp.yourwhatsapp.relay_client import relay_settings
-from yourwhatsapp.yourwhatsapp.routing import set_account_active
+from yourwhatsapp.yourwhatsapp.routing import repoint_default_accounts, set_account_active
 
 TIMEOUT = 15
 ALREADY_PAIRED = "already_paired"
@@ -15,6 +15,10 @@ class WhatsAppAccount(Document):
 	def before_insert(self):
 		if not self.session_id:
 			self.session_id = f"acc-{random_string(10).lower()}"
+
+	def on_trash(self):
+		# Before Frappe's link check, so a Settings default doesn't block the delete.
+		repoint_default_accounts(exclude=self.name)
 
 	@frappe.whitelist()
 	def connect(self):
@@ -44,6 +48,7 @@ class WhatsAppAccount(Document):
 		self._check_admin()
 		self._relay_post("pause")
 		self.db_set("status", "Paused")
+		repoint_default_accounts()
 
 	@frappe.whitelist()
 	def resume(self):
@@ -59,6 +64,7 @@ class WhatsAppAccount(Document):
 		self._check_admin()
 		self._relay_post("logout")
 		self.db_set({"status": "Disconnected", "connected_at": None})
+		repoint_default_accounts()
 
 	def _proxy_body(self):
 		# "" clears the relay's stored proxy; null would keep it. A change

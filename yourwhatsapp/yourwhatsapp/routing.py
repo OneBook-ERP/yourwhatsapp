@@ -62,13 +62,15 @@ def mark_rate_limited(account, until=None):
 	if until:
 		values["rate_limited_until"] = until
 	frappe.db.set_value("WhatsApp Account", account, values)
+	repoint_default_accounts()
 
 
 def set_account_active(account, connected_at=True):
 	"""Mark an account Active unless an admin hold stops the relay from doing so.
 
 	Every path that activates an account goes through here, so the Settings
-	defaults CRM needs (it only checks that one is set) fill themselves.
+	defaults CRM needs (it shows WhatsApp only while the default outgoing
+	account is Active) fill themselves.
 	"""
 	from yourwhatsapp.yourwhatsapp.api import relay_may_set_status
 
@@ -82,12 +84,39 @@ def set_account_active(account, connected_at=True):
 	return True
 
 
-def fill_default_accounts(account):
-	"""Point each empty or dangling Settings default at `account`; sending never reads them."""
-	for fieldname in ("default_outgoing_account", "default_incoming_account"):
+DEFAULT_FIELDS = ("default_outgoing_account", "default_incoming_account")
+
+
+def fill_default_accounts(account=None, exclude=None):
+	"""Point each Settings default that is empty, dangling or not Active at an
+	Active account: `account` when it is Active, else the first Active one by
+	priority. With no Active account left the defaults stay as they are.
+	Sending never reads them; CRM needs the outgoing one Active to show WhatsApp."""
+	for fieldname in DEFAULT_FIELDS:
 		current = frappe.db.get_single_value("WhatsApp Settings", fieldname)
-		if not current or not frappe.db.exists("WhatsApp Account", current):
-			frappe.db.set_single_value("WhatsApp Settings", fieldname, account)
+		if current and current != exclude and _is_active(current):
+			continue
+		replacement = account if account and account != exclude and _is_active(account) else None
+		replacement = replacement or _first_active_account(exclude)
+		if replacement and replacement != current:
+			# A background write: must not bump modified under an open Settings form.
+			frappe.db.set_single_value("WhatsApp Settings", fieldname, replacement, update_modified=False)
+
+
+def repoint_default_accounts(exclude=None):
+	"""Call after an account stops being Active (or, with `exclude`, before it is deleted)."""
+	fill_default_accounts(exclude=exclude)
+
+
+def _is_active(account):
+	return frappe.db.get_value("WhatsApp Account", account, "status") == "Active"
+
+
+def _first_active_account(exclude=None):
+	# Sorted here: frappe.get_all refuses ifnull() in order_by, and NULL priority means 0.
+	accounts = frappe.get_all("WhatsApp Account", filters={"status": "Active"}, fields=["name", "priority", "creation"])
+	accounts = sorted((a for a in accounts if a.name != exclude), key=lambda a: (a.priority or 0, a.creation))
+	return accounts[0].name if accounts else None
 
 
 def mark_disconnected(account):
@@ -96,6 +125,7 @@ def mark_disconnected(account):
 
 	if relay_may_set_status(account, "Disconnected"):
 		frappe.db.set_value("WhatsApp Account", account, "status", "Disconnected")
+		repoint_default_accounts()
 
 
 def to_system_datetime(rfc3339: str) -> datetime:

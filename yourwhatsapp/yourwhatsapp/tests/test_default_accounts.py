@@ -20,7 +20,7 @@ def relay_response(body):
 	return response
 
 
-class TestDefaultAccounts(IntegrationTestCase):
+class DefaultsTestCase(IntegrationTestCase):
 	"""Everything runs in a transaction that is rolled back: the live Settings defaults are never kept changed."""
 
 	def setUp(self):
@@ -59,6 +59,12 @@ class TestDefaultAccounts(IntegrationTestCase):
 	def _status(self, account=None):
 		return frappe.db.get_value("WhatsApp Account", (account or self.account).name, "status")
 
+	def _relay(self, status, call):
+		with patch("requests.post", return_value=relay_response({"status": status})):
+			call()
+
+
+class TestDefaultAccounts(DefaultsTestCase):
 	def test_first_active_fills_defaults(self):
 		self.assertTrue(routing.set_account_active(self.account.name))
 		self.assertEqual(self._status(), "Active")
@@ -104,10 +110,6 @@ class TestDefaultAccounts(IntegrationTestCase):
 				self.assertEqual(self._status(), "Active")
 				self.assertEqual(self._defaults(), (self.account.name, self.account.name))
 
-	def _relay(self, status, call):
-		with patch("requests.post", return_value=relay_response({"status": status})):
-			call()
-
 	def _already_paired(self):
 		conflict = relay_response({"detail": "already paired"})
 		conflict.status_code = 409
@@ -129,6 +131,7 @@ class TestDefaultAccounts(IntegrationTestCase):
 			self.assertEqual(frappe.db.get_value("WhatsApp Account", default, "status"), "Active")
 
 	def test_patch_keeps_valid_default_and_replaces_dangling(self):
+		frappe.db.set_value("WhatsApp Account", self.account.name, "status", "Active")
 		self._set_defaults("No Such Account", self.account.name)
 		fill_default_whatsapp_accounts.execute()
 		outgoing, incoming = self._defaults()
@@ -147,3 +150,61 @@ class TestDefaultAccounts(IntegrationTestCase):
 			patch.object(frappe, "get_cached_value", return_value="Round Robin"),
 		):
 			self.assertEqual(routing.pick_account(), second.name)
+
+
+class TestDefaultsFollowActive(DefaultsTestCase):
+	"""CRM's is_whatsapp_enabled needs the default outgoing account to be Active, not just set."""
+
+	def setUp(self):
+		super().setUp()
+		frappe.db.set_value("WhatsApp Account", self.account.name, "status", "Active")
+		self.other = self._make_account("Default Test B", "15550001002")
+		self._set_defaults(self.account.name, self.account.name)
+
+	def _assert_repointed(self):
+		outgoing, incoming = self._defaults()
+		for default in (outgoing, incoming):
+			self.assertNotEqual(default, self.account.name)
+			self.assertEqual(frappe.db.get_value("WhatsApp Account", default, "status"), "Active")
+		from crm.api.whatsapp import is_whatsapp_enabled
+
+		self.assertTrue(is_whatsapp_enabled())
+
+	def test_transitions_away_from_active_repoint_defaults(self):
+		transitions = {
+			"mark_disconnected": lambda: routing.mark_disconnected(self.account.name),
+			"mark_rate_limited": lambda: routing.mark_rate_limited(self.account.name),
+			"pause": lambda: self._relay("ok", self.account.pause),
+			"logout": lambda: self._relay("ok", self.account.logout),
+			"update_qr": lambda: api.update_qr(self.account.session_id, status="Disconnected"),
+			"account_event": lambda: api.account_event(self.account.session_id, "temp_banned"),
+		}
+		for label, run in transitions.items():
+			with self.subTest(transition=label):
+				frappe.db.set_value(
+					"WhatsApp Account", self.account.name, {"status": "Active", "rate_limited_until": None}
+				)
+				self._set_defaults(self.account.name, self.account.name)
+				run()
+				self.assertNotEqual(self._status(), "Active")
+				self._assert_repointed()
+
+	def test_deleting_default_account_repoints(self):
+		frappe.delete_doc("WhatsApp Account", self.account.name, ignore_permissions=True)
+		self._assert_repointed()
+
+	def test_fill_replaces_inactive_default(self):
+		frappe.db.set_value("WhatsApp Account", self.other.name, "status", "Disconnected")
+		self._set_defaults(self.other.name, self.other.name)
+		routing.set_account_active(self.account.name)
+		self.assertEqual(self._defaults(), (self.account.name, self.account.name))
+
+	def test_no_active_account_left_keeps_defaults(self):
+		frappe.db.set_value("WhatsApp Account", {"name": ["!=", self.account.name]}, "status", "Disconnected")
+		routing.mark_disconnected(self.account.name)
+		self.assertEqual(self._defaults(), (self.account.name, self.account.name))
+
+	def test_background_default_write_keeps_settings_modified(self):
+		modified = frappe.db.get_single_value("WhatsApp Settings", "modified")
+		routing.mark_disconnected(self.account.name)
+		self.assertEqual(frappe.db.get_single_value("WhatsApp Settings", "modified"), modified)

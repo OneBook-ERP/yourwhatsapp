@@ -96,7 +96,7 @@ CRM sends templates with their `{{1}}`, `{{2}}`... placeholders. Each template n
 
 Create a **WhatsApp Account** per number, then click **Connect / Generate QR** and scan from WhatsApp, Linked Devices, Link a device. Alternatively use the pairing-code option on the account form, enter the phone number, and type the code into the phone (Linked Devices, Link with phone number instead). Sessions are stored in the volume and restored on restart: no re-scan needed.
 
-Default number: you do not choose one. WhatsApp Settings' **Default Outgoing / Incoming Account** exist only so CRM shows WhatsApp; they are filled automatically with the first account that becomes Active (and refilled if they point at a deleted account). Sending rotates across all Active numbers, regardless of that field, and replies do not stick to one number.
+Default number: you do not choose one. WhatsApp Settings' **Default Outgoing / Incoming Account** exist only so CRM shows WhatsApp; CRM shows WhatsApp only while the default outgoing account is **Active**, so both are kept pointing at an Active number automatically: filled when the first number becomes Active, and moved to another Active number when theirs disconnects, is rate-limited, paused, logged out or deleted. If no number is Active, CRM hides WhatsApp until one reconnects. Sending rotates across all Active numbers, regardless of that field, and replies do not stick to one number.
 
 Proxy: set **Proxy** on the account before connecting. Changing or clearing it later applies only on the next connect: click **Pause**, then **Resume**.
 

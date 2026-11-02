@@ -3,7 +3,12 @@ import frappe
 from frappe.utils import get_datetime, now_datetime
 
 from yourwhatsapp.yourwhatsapp.relay_client import RELAY_RESTARTED, increment_daily_count
-from yourwhatsapp.yourwhatsapp.routing import mark_rate_limited, set_account_active, to_system_datetime
+from yourwhatsapp.yourwhatsapp.routing import (
+	mark_rate_limited,
+	repoint_default_accounts,
+	set_account_active,
+	to_system_datetime,
+)
 
 STATUS_RANK = {"Queued": 0, "Sent": 1, "Delivered": 2, "Read": 3}
 # relay_restarted goes through the same job, which retries it on the same account.
@@ -220,6 +225,7 @@ def update_qr(session_id: str, qr_base64: str | None = None, status: str | None 
 			frappe.db.set_value("WhatsApp Account", account, "qr_code", None)
 	elif status and relay_may_set_status(account, status):
 		frappe.db.set_value("WhatsApp Account", account, "status", status)
+		repoint_default_accounts()
 
 	if qr_base64:
 		_save_qr_image(account, qr_base64)

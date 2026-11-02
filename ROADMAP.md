@@ -84,7 +84,7 @@ Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`. Compariso
 - [ ] Reactions (`content_type: reaction`) are sent as a plain text emoji — use `msg.react()` on the target message.
 - [ ] Replies: pass `quotedMessageId` on outgoing replies; send `reply_to_message_id` on inbound quoted messages so CRM shows reply context.
 - [x] (→ §0) Unresolvable `@lid` senders are stored as a fake phone number (e.g. `157844527657214`) — store the raw lid in a separate field and flag it instead.
-- [x] `default_outgoing_account` (Settings) vs `is_default_outgoing` (Account) duplication; CRM's `is_whatsapp_enabled` requires the Settings one — routing ignores both. Done: per-account checkboxes removed; the Settings default is auto-filled with an Active account (CRM only checks that it is set).
+- [x] `default_outgoing_account` (Settings) vs `is_default_outgoing` (Account) duplication; CRM's `is_whatsapp_enabled` requires the Settings one — routing ignores both. Done: per-account checkboxes removed; the Settings defaults are kept on an Active account (CRM's `is_whatsapp_enabled` checks that the default outgoing account is Active), refilled on every transition away from Active and on delete.
 
 ### F. Minimum anti-ban before real volume (subset of Phase 3)
 - [x] ~~Per-account realistic user-agent~~ — moot with whatsmeow (no browser); device props set in §0.
