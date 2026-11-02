@@ -62,6 +62,9 @@ Pairing: create a `WhatsApp Account`, then either click **Connect / Generate QR*
 - **One SQLite file, `relay.db`, in `RELAY_DATA_DIR`, holds every linked number's device keys** plus the callback outbox. Back it up (see `DEPLOYMENT.md`); losing it means relinking every number. Treat it as a credential.
 - **Never run two relays against the same data dir (or the same linked number)** — WhatsApp answers with `StreamReplaced` and the two fight. Stop the old one first.
 - **Send is asynchronous:** `POST /message/send` returns 202 `queued`; the real result arrives as a `message_status` callback.
+- **`/claim` and `PUT /claim/callback` call Frappe back first** (`api.ping` at the candidate callback URL, with the candidate key and `Host: <site_name>`); an unreachable target is refused with 400 `callback_unreachable`. The Frappe web server must be able to serve that ping while the claim request is still open (fine with threaded `bench serve` or more than one gunicorn worker).
+- **A 401 on send never fails a message:** `relay_client` adopts a pending key the relay accepts, else parks the message for the relay-unavailable retry.
+- **Relay connection fields are System Manager only, enforced in `WhatsApp Settings.validate`**; a typed `relay_api_key` saves only while the relay is in env mode. Tests set keys with `write_password`, never via `settings.save()`.
 - Docker files (`relay/Dockerfile`, `relay/compose.whatsapp.yaml`) were written without Docker on the dev host and are untested until the first real deploy.
 
 ## Hard-won gotchas
