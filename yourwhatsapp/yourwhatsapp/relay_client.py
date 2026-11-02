@@ -200,6 +200,12 @@ def _post(doc, account, base_url: str, api_key: str, message: str):
 				raise
 
 
+def _adopt_pending_key() -> str | None:
+	from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings.whatsapp_settings import adopt_pending_key
+
+	return adopt_pending_key()
+
+
 def _error_code(response) -> str | None:
 	try:
 		return response.json().get("error")
@@ -242,6 +248,7 @@ def _dispatch(doc):
 	# Stays True while every account only failed to answer (connection error,
 	# timeout, 409 session_unavailable): the relay as a whole is unavailable.
 	relay_unavailable = True
+	key_adopted = False
 	while True:
 		if previous_account and time.monotonic() - started > DISPATCH_BUDGET_SECONDS:
 			reason = "relay unreachable; dispatch time budget exhausted"
@@ -268,6 +275,15 @@ def _dispatch(doc):
 			if status == 200 and previous_account:
 				# The earlier account (e.g. after a timeout) actually holds the send.
 				doc.db_set("whatsapp_account", previous_account)
+			return
+		if status == 401:
+			# This site's key is out of step with the relay, which says nothing
+			# about the message: adopt a pending key the relay takes, else park it.
+			new_key = None if key_adopted else _adopt_pending_key()
+			if new_key:
+				api_key, key_adopted = new_key, True
+				continue
+			_retry_later(doc, "Relay rejected the API key")
 			return
 		code = _error_code(response)
 		if status in (400, 422):

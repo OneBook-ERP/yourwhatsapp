@@ -7,9 +7,11 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, now_datetime
 
 from yourwhatsapp.yourwhatsapp import api, relay_client, routing, tasks
+from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings.whatsapp_settings import write_password
 from yourwhatsapp.yourwhatsapp.routing import to_system_datetime
 
 RELAY_KEY = "test-relay-key"
+PENDING_KEY = "p" * 43
 
 
 def relay_response(status_code, body=None):
@@ -381,3 +383,55 @@ class TestRelayClient(IntegrationTestCase):
 		manual = self._make_account("Client Manual", status="RateLimited")
 		tasks.recover_rate_limited_accounts()
 		self.assertEqual(self._account_value(manual, "status"), "RateLimited")
+
+
+	# A 401 means this site's key is out of step with the relay, never that the message is bad.
+	def _info(self, status_code, body):
+		return patch("requests.request", return_value=relay_response(status_code, body))
+
+	def _settings_key(self, fieldname):
+		return frappe.get_single("WhatsApp Settings").get_password(fieldname, raise_exception=False)
+
+	def test_401_with_accepted_pending_key_promotes_and_resends(self):
+		write_password("relay_pending_key", PENDING_KEY)
+		msg = self._make_message()
+		with self._info(200, {"claimed": True, "mode": "claimed", "sessions": {}}) as info:
+			post = self._send(msg, relay_response(401, {"error": "invalid api key"}), relay_response(202))
+		self.assertEqual(info.call_args.kwargs["headers"], {"x-api-key": PENDING_KEY})
+		self.assertEqual(post.call_count, 2)
+		self.assertEqual(post.call_args.kwargs["headers"], {"x-api-key": PENDING_KEY})
+		self.assertEqual(post.call_args.kwargs["json"]["session_id"], self.account_a.session_id)
+		row = self._row(msg.name)
+		self.assertEqual((row.status, row.whatsapp_account), ("Queued", self.account_a.name))
+		self.assertEqual(self._settings_key("relay_api_key"), PENDING_KEY)
+		self.assertFalse(self._settings_key("relay_pending_key"))
+
+	def test_401_with_rejected_pending_key_retries_later(self):
+		write_password("relay_pending_key", PENDING_KEY)
+		msg = self._make_message()
+		with self._info(401, {"error": "invalid api key"}):
+			post = self._send(msg, relay_response(401, {"error": "invalid api key"}))
+		self.assertEqual(post.call_count, 1)
+		self._assert_parked(msg)
+		self.assertEqual(self._settings_key("relay_pending_key"), PENDING_KEY)
+		self.assertEqual(self._settings_key("relay_api_key"), RELAY_KEY)
+
+	def test_401_without_pending_key_retries_later(self):
+		msg = self._make_message()
+		post = self._send(msg, relay_response(401, {"error": "invalid api key"}))
+		self.assertEqual(post.call_count, 1)
+		self._assert_parked(msg)
+
+	def test_401_again_after_promotion_retries_later(self):
+		write_password("relay_pending_key", PENDING_KEY)
+		msg = self._make_message()
+		rejected = relay_response(401, {"error": "invalid api key"})
+		with self._info(200, {"claimed": True, "mode": "claimed", "sessions": {}}):
+			post = self._send(msg, rejected, rejected)
+		self.assertEqual(post.call_count, 2)
+		self._assert_parked(msg)
+
+	def _assert_parked(self, msg):
+		row = frappe.db.get_value("WhatsApp Message", msg.name, ["status", "next_retry_at"], as_dict=True)
+		self.assertEqual(row.status, "Queued")
+		self.assertIsNotNone(row.next_retry_at)

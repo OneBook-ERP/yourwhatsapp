@@ -222,6 +222,17 @@ class WhatsAppSettings(Document):
 		return (self.relay_reachable_frappe_url or "").strip() or frappe.utils.get_url()
 
 
+def adopt_pending_key():
+	"""The relay refused this site's key: if it takes the pending key (a claim
+	or rotation whose 200 was lost), make that the current key and return it."""
+	settings = frappe.get_single(DOCTYPE)
+	pending = settings.get_password("relay_pending_key", raise_exception=False)
+	if not pending or settings._accepts(pending) != ACCEPTED:
+		return None
+	settings._promote_pending(pending)
+	return pending
+
+
 def write_password(fieldname, value):
 	"""Store a Settings password directly, without saving (and returning) the whole doc.
 
