@@ -20,6 +20,8 @@ class WhatsAppAccount(Document):
 	def on_trash(self):
 		# Before Frappe's link check, so a Settings default doesn't block the delete.
 		repoint_default_accounts(exclude=self.name)
+		# A later account reusing this name must not inherit its outage state.
+		alerts.clear_alert_keys(self.name)
 
 	@frappe.whitelist()
 	def connect(self):

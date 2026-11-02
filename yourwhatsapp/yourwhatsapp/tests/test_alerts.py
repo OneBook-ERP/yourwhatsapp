@@ -4,20 +4,19 @@ from unittest.mock import patch
 import frappe
 
 from yourwhatsapp.yourwhatsapp import alerts, api, routing
-from yourwhatsapp.yourwhatsapp.tests.test_default_accounts import RELAY_KEY, relay_response
+from yourwhatsapp.yourwhatsapp.tests.test_default_accounts import RELAY_KEY
 from yourwhatsapp.yourwhatsapp.tests.utils import LiveSafeTestCase
-
-KEY_KINDS = ("down", "down_sent", "manual")
 
 
 class AlertsTestCase(LiveSafeTestCase):
-	"""Redis is shared with the live site: every test uses a unique account name and clears its keys."""
+	"""The real alert path. The base class keeps sendmail mocked and Redis keys in a cleared "test:" namespace."""
+
+	real_alerts = True
 
 	def setUp(self):
 		super().setUp()
 		self.account = f"alert-test-{uuid.uuid4().hex[:8]}"
-		self.addCleanup(self._clear_keys, self.account)
-		self.sendmail = self._patch("frappe.sendmail")
+		self.sendmail = self.sendmail_mock
 		self._patch("yourwhatsapp.yourwhatsapp.alerts.has_outgoing_email_account", return_value=True)
 		self.recipients = self._make_user("alert-admin@example.test", "WhatsApp Admin")
 
@@ -26,10 +25,6 @@ class AlertsTestCase(LiveSafeTestCase):
 		mock = started.start()
 		self.addCleanup(started.stop)
 		return mock
-
-	def _clear_keys(self, account):
-		for kind in KEY_KINDS:
-			frappe.cache.delete_value(alerts.alert_key(account, kind))
 
 	def _make_user(self, email, role, enabled=1):
 		if not frappe.db.exists("Role", role):
@@ -74,9 +69,13 @@ class AlertsTestCase(LiveSafeTestCase):
 		self.assertNotIn("Guest", found)
 
 	def test_administrator_only_with_email(self):
-		with patch.object(alerts, "_user_email", side_effect=lambda user: None if user == "Administrator" else user):
-			self.assertNotIn("Administrator", alerts.alert_recipients())
-		with patch.object(alerts, "_user_email", side_effect=lambda user: "admin@example.test"):
+		for email in (None, "admin@example.com"):
+			with patch.object(frappe.db, "get_value", wraps=frappe.db.get_value) as get_value:
+				get_value.side_effect = lambda doctype, name=None, *a, **k: (
+					(1, email) if name == "Administrator" and doctype == "User" else frappe.db.get_value.__wrapped__(doctype, name, *a, **k)
+				)
+				self.assertNotIn("Administrator", alerts.alert_recipients())
+		with patch.object(alerts, "_administrator_email", return_value="boss@company.test"):
 			self.assertIn("Administrator", alerts.alert_recipients())
 
 	def test_flap_throttled(self):
@@ -132,8 +131,6 @@ class AlertsTestCase(LiveSafeTestCase):
 
 	def test_no_email_account_bell_only(self):
 		self._patch("yourwhatsapp.yourwhatsapp.alerts.has_outgoing_email_account", return_value=False)
-		self.addCleanup(frappe.cache.delete_value, alerts.NO_EMAIL_LOGGED_KEY)
-		frappe.cache.delete_value(alerts.NO_EMAIL_LOGGED_KEY)
 		with patch("frappe.log_error") as log_error:
 			alerts.account_status_changed(self.account, "Active", "Disconnected")
 			alerts.account_status_changed(self.account, "Disconnected", "Active")
@@ -142,14 +139,48 @@ class AlertsTestCase(LiveSafeTestCase):
 		log_error.assert_called_once()
 
 
+	def test_recipient_without_email_gets_bell_only(self):
+		no_email = self._make_user("alert-noemail@example.test", "WhatsApp Admin")
+		with patch.object(alerts, "_user_email", side_effect=lambda user: None if user == no_email else user):
+			alerts.account_status_changed(self.account, "Active", "Disconnected")
+		self.assertIn(no_email, [b.for_user for b in self._bells()])
+		self.assertNotIn(no_email, self.sendmail.call_args.kwargs["recipients"])
+		self.assertIn(self.recipients, self.sendmail.call_args.kwargs["recipients"])
+
+	def test_email_link_is_escaped(self):
+		alerts._email([self.recipients], "s", "d", 'http://x.test/a"b')
+		self.assertIn("a&quot;b", self.sendmail.call_args.kwargs["message"])
+
+	def test_down_sent_has_ttl(self):
+		with patch.object(frappe.cache, "set_value", wraps=frappe.cache.set_value) as set_value:
+			alerts.account_status_changed(self.account, "Active", "Disconnected")
+		ttls = {c.args[0]: c.kwargs.get("expires_in_sec") for c in set_value.call_args_list}
+		self.assertEqual(ttls[alerts.alert_key(self.account, "down_sent")], alerts.DOWN_SENT_SECONDS)
+
+	def test_alert_failure_never_raises(self):
+		with patch.object(alerts, "_send_down", side_effect=RuntimeError), patch(
+			"frappe.log_error", side_effect=RuntimeError
+		):
+			alerts.account_status_changed(self.account, "Active", "Disconnected")
+
+	def test_deleted_account_name_reuse_has_no_spurious_recovery(self):
+		account = frappe.get_doc(
+			{"doctype": "WhatsApp Account", "account_name": "Alert Reuse", "phone_number": "15550009002",
+			 "status": "Active"}
+		).insert(ignore_permissions=True)
+		alerts.account_status_changed(account.name, "Active", "Disconnected")
+		frappe.delete_doc("WhatsApp Account", account.name, force=True, ignore_permissions=True)
+		self.sendmail.reset_mock()
+		alerts.account_status_changed(account.name, "Disconnected", "Active")
+		self.sendmail.assert_not_called()
+
+
 class AlertWiringTestCase(LiveSafeTestCase):
 	"""The routing helpers, account events and admin actions reach alerts.account_status_changed."""
 
 	def setUp(self):
 		super().setUp()
-		changed = patch("yourwhatsapp.yourwhatsapp.alerts.account_status_changed")
-		self.changed = changed.start()
-		self.addCleanup(changed.stop)
+		self.changed = self.alerts_mock
 		self.account = frappe.get_doc(
 			{"doctype": "WhatsApp Account", "account_name": "Alert Wiring", "phone_number": "15550009001",
 			 "status": "Active"}
@@ -163,6 +194,12 @@ class AlertWiringTestCase(LiveSafeTestCase):
 		frappe.db.set_value("WhatsApp Account", self.account.name, "status", "Paused")
 		self.assertFalse(routing.mark_disconnected(self.account.name))
 		self.changed.assert_not_called()
+
+	def test_mark_disconnected_already_disconnected_does_not_alert(self):
+		frappe.db.set_value("WhatsApp Account", self.account.name, "status", "Disconnected")
+		routing.mark_disconnected(self.account.name)
+		# The hook still runs, but with old == new the real function ignores it.
+		self.changed.assert_called_once_with(self.account.name, "Disconnected", "Disconnected", None)
 
 	def test_mark_rate_limited_reports(self):
 		self.assertTrue(routing.mark_rate_limited(self.account.name))
@@ -191,9 +228,7 @@ class AlertWiringTestCase(LiveSafeTestCase):
 		self.changed.assert_called_once_with(self.account.name, "Active", "Disconnected", "client outdated")
 
 	def test_pause_and_logout_are_manual(self):
-		with patch("requests.post", return_value=relay_response({})), patch.object(
-			type(self.account), "_relay_post", return_value={}
-		):
+		with patch.object(type(self.account), "_relay_post", return_value={}):
 			self.account.pause()
 			self.changed.assert_called_with(self.account.name, "Active", "Paused", reason="manual")
 			self.account.logout()

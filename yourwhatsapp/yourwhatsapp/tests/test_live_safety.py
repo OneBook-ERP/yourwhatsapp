@@ -1,6 +1,12 @@
 import ast
 import pathlib
 import unittest
+from unittest.mock import MagicMock
+
+import frappe
+
+from yourwhatsapp.yourwhatsapp import alerts
+from yourwhatsapp.yourwhatsapp.tests.utils import LiveSafeTestCase
 
 TESTS_DIR = pathlib.Path(__file__).parent
 BASE = "LiveSafeTestCase"
@@ -43,3 +49,21 @@ class TestLiveSafety(unittest.TestCase):
 			if not safe
 		]
 		self.assertEqual(offenders, [])
+
+
+class TestAlertIsolation(LiveSafeTestCase):
+	"""A module that does not opt in can neither deliver alerts nor touch a real alert key."""
+
+	def test_alert_delivery_is_mocked(self):
+		self.assertIsInstance(self.alerts_mock, MagicMock)
+		self.assertIs(alerts.account_status_changed, self.alerts_mock)
+		self.assertIsInstance(frappe.sendmail, MagicMock)
+
+	def test_alert_keys_are_test_namespaced_and_cleared(self):
+		key = alerts.alert_key("isolation-check", "down")
+		self.assertFalse(key.startswith("yourwhatsapp:alert:"))
+		frappe.cache.set_value(key, 1)
+		self.assertIn(key, self._alert_keys)
+		self.tearDown()
+		self.assertIsNone(frappe.cache.get_value(key, use_local_cache=False))
+		self.setUp()

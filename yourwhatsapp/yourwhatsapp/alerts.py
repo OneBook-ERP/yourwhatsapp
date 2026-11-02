@@ -12,11 +12,21 @@ ALERT_ROLES = ("System Manager", "WhatsApp Admin")
 DOWN_THROTTLE_SECONDS = 15 * 60
 MANUAL_SECONDS = 5 * 60
 NO_EMAIL_LOG_SECONDS = 24 * 60 * 60
-NO_EMAIL_LOGGED_KEY = "yourwhatsapp:alert:no_email_account_logged"
+DOWN_SENT_SECONDS = 30 * 24 * 60 * 60
+KEY_PREFIX = "yourwhatsapp:alert:"
+KEY_KINDS = ("down", "down_sent", "manual")
+NO_EMAIL_LOGGED_ACCOUNT = "_all"
+NO_EMAIL_LOGGED_KIND = "no_email_logged"
 
 
 def alert_key(account: str, kind: str) -> str:
-	return f"yourwhatsapp:alert:{account}:{kind}"
+	return f"{KEY_PREFIX}{account}:{kind}"
+
+
+def clear_alert_keys(account: str) -> None:
+	"""Forget an account's alert state, e.g. when it is deleted and its name is reused."""
+	for kind in KEY_KINDS:
+		frappe.cache.delete_value(alert_key(account, kind))
 
 
 def account_status_changed(account: str, old: str | None, new: str, reason: str | None = None) -> None:
@@ -36,8 +46,14 @@ def account_status_changed(account: str, old: str | None, new: str, reason: str 
 		else:
 			_send_down(account, new, reason)
 	except Exception:
-		# A failing alert must never undo or block the status change that triggered it.
-		frappe.log_error(title="WhatsApp health alert failed", reference_doctype="WhatsApp Account", reference_name=account)
+		# A failing alert must never undo or block the status change that triggered it,
+		# not even when the transaction is too broken to write the Error Log.
+		try:
+			frappe.log_error(
+				title="WhatsApp health alert failed", reference_doctype="WhatsApp Account", reference_name=account
+			)
+		except Exception:
+			pass
 
 
 def alert_recipients() -> list[str]:
@@ -50,13 +66,21 @@ def alert_recipients() -> list[str]:
 	)
 	enabled = frappe.get_all("User", filters={"name": ("in", users), "enabled": 1}, pluck="name") if users else []
 	recipients = {user for user in enabled if user not in ("Guest", "Administrator")}
-	if _user_email("Administrator"):
+	if _administrator_email():
 		recipients.add("Administrator")
 	return sorted(recipients)
 
 
 def has_outgoing_email_account() -> bool:
 	return bool(frappe.db.exists("Email Account", {"default_outgoing": 1, "enable_outgoing": 1}))
+
+
+def _administrator_email() -> str | None:
+	"""Administrator's address if it is enabled and real (the install default admin@example.com is not)."""
+	enabled, email = frappe.db.get_value("User", "Administrator", ["enabled", "email"]) or (0, None)
+	if not enabled or not email or email.lower().endswith("@example.com"):
+		return None
+	return email
 
 
 def _user_email(user: str) -> str | None:
@@ -69,7 +93,7 @@ def _send_down(account: str, new: str, reason: str | None):
 	if frappe.cache.get_value(alert_key(account, "down")):
 		return
 	frappe.cache.set_value(alert_key(account, "down"), 1, expires_in_sec=DOWN_THROTTLE_SECONDS)
-	frappe.cache.set_value(alert_key(account, "down_sent"), 1)
+	frappe.cache.set_value(alert_key(account, "down_sent"), 1, expires_in_sec=DOWN_SENT_SECONDS)
 	detail = f"{new} ({reason})" if reason else new
 	subject = _("WhatsApp number {0} is down: {1}").format(account, detail)
 	_notify(account, subject, _("Messages cannot be sent from this number until it is Active again."))
@@ -110,14 +134,19 @@ def _email(recipients: list[str], subject: str, detail: str, link: str):
 	if not has_outgoing_email_account():
 		_log_no_email_account_once()
 		return
-	message = f"<p>{escape_html(subject)}</p><p>{escape_html(detail)}</p><p><a href='{link}'>{_('Open the account')}</a></p>"
+	open_label = _("Open the account")
+	message = (
+		f"<p>{escape_html(subject)}</p><p>{escape_html(detail)}</p>"
+		f'<p><a href="{escape_html(link)}">{escape_html(open_label)}</a></p>'
+	)
 	frappe.sendmail(recipients=addresses, subject=subject, message=message, now=False)
 
 
 def _log_no_email_account_once():
-	if frappe.cache.get_value(NO_EMAIL_LOGGED_KEY):
+	key = alert_key(NO_EMAIL_LOGGED_ACCOUNT, NO_EMAIL_LOGGED_KIND)
+	if frappe.cache.get_value(key):
 		return
-	frappe.cache.set_value(NO_EMAIL_LOGGED_KEY, 1, expires_in_sec=NO_EMAIL_LOG_SECONDS)
+	frappe.cache.set_value(key, 1, expires_in_sec=NO_EMAIL_LOG_SECONDS)
 	frappe.log_error(
 		title="WhatsApp health alert not emailed",
 		message="No default outgoing Email Account is enabled, so WhatsApp health alerts only reach the bell.",
