@@ -58,7 +58,7 @@ func run(log *slog.Logger) error {
 	}
 	defer st.Close()
 
-	cs, err := claim.New(st, cfg, time.Now)
+	cs, err := claim.New(st, cfg, time.Now, log)
 	if err != nil {
 		return fmt.Errorf("load relay identity: %w", err)
 	}
@@ -89,7 +89,7 @@ func run(log *slog.Logger) error {
 
 	srv := &http.Server{
 		Addr:              net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
-		Handler:           api.NewHandler(manager, st, cs, log, version),
+		Handler:           api.NewHandler(manager, st, cs, log, version, outbox.Ping, worker.Notify),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	ln, err := net.Listen("tcp", srv.Addr)

@@ -1,8 +1,11 @@
 package claim
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
+	"log/slog"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -20,6 +23,8 @@ var (
 
 func clock() time.Time { return fixedNow }
 
+var discardLog = slog.New(slog.NewJSONHandler(io.Discard, nil))
+
 func openStore(t *testing.T) *store.Store {
 	t.Helper()
 	st, err := store.Open(context.Background(), t.TempDir())
@@ -32,7 +37,7 @@ func openStore(t *testing.T) *store.Store {
 
 func newState(t *testing.T, st *store.Store, cfg config.Config) *State {
 	t.Helper()
-	cs, err := New(st, cfg, clock)
+	cs, err := New(st, cfg, clock, discardLog)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +111,7 @@ func TestClaimHappyPath(t *testing.T) {
 	if err != nil || rc == nil || rc.APIKey != goodKey || rc.CallbackURL != "https://crm.example.com/" || !rc.ClaimedAt.Equal(fixedNow) {
 		t.Fatalf("stored = %+v, %v", rc, err)
 	}
-	if err := cs.Claim(context.Background(), goodKey, "http://x", "", ""); !errors.Is(err, ErrAlreadyClaimed) {
+	if err := cs.Claim(context.Background(), goodKey, "http://x", "site", ""); !errors.Is(err, ErrAlreadyClaimed) {
 		t.Fatalf("second claim err = %v", err)
 	}
 	if n := hookRuns.Load(); n != 1 {
@@ -125,7 +130,7 @@ func TestClaimAlreadyClaimed(t *testing.T) {
 	}
 	cs := newState(t, st, config.Config{})
 	other := strings.Repeat("o", MinKeyLen)
-	if err := cs.Claim(context.Background(), other, "http://b", "", ""); !errors.Is(err, ErrAlreadyClaimed) {
+	if err := cs.Claim(context.Background(), other, "http://b", "site", ""); !errors.Is(err, ErrAlreadyClaimed) {
 		t.Fatalf("err = %v, want ErrAlreadyClaimed", err)
 	}
 	if _, _, key := cs.Target(); key != goodKey {
@@ -136,7 +141,7 @@ func TestClaimAlreadyClaimed(t *testing.T) {
 func TestClaimEnvModeRejected(t *testing.T) {
 	st := openStore(t)
 	cs := newState(t, st, config.Config{APIKey: "envkey"})
-	if err := cs.Claim(context.Background(), goodKey, "http://b", "", ""); !errors.Is(err, ErrAlreadyClaimed) {
+	if err := cs.Claim(context.Background(), goodKey, "http://b", "site", ""); !errors.Is(err, ErrAlreadyClaimed) {
 		t.Fatalf("err = %v, want ErrAlreadyClaimed", err)
 	}
 	if rc, _ := st.GetRelayConfig(context.Background()); rc != nil {
@@ -147,14 +152,14 @@ func TestClaimEnvModeRejected(t *testing.T) {
 func TestClaimBootstrapRequiredWrongRight(t *testing.T) {
 	cs := newState(t, openStore(t), config.Config{BootstrapToken: "boot-secret"})
 	for _, tok := range []string{"", "wrong"} {
-		if err := cs.Claim(context.Background(), goodKey, "http://a", "", tok); !errors.Is(err, ErrBadBootstrapToken) {
+		if err := cs.Claim(context.Background(), goodKey, "http://a", "site", tok); !errors.Is(err, ErrBadBootstrapToken) {
 			t.Fatalf("token %q: err = %v, want ErrBadBootstrapToken", tok, err)
 		}
 	}
 	if cs.Mode() != ModeUnclaimed {
 		t.Fatal("a bad token must leave the relay unclaimed")
 	}
-	if err := cs.Claim(context.Background(), goodKey, "http://a", "", "boot-secret"); err != nil {
+	if err := cs.Claim(context.Background(), goodKey, "http://a", "site", "boot-secret"); err != nil {
 		t.Fatalf("right token: %v", err)
 	}
 }
@@ -170,7 +175,7 @@ func TestClaimShortKeyOrBadURL400(t *testing.T) {
 		{goodKey, "://bad"},
 	}
 	for _, c := range cases {
-		err := cs.Claim(context.Background(), c.key, c.url, "", "")
+		err := cs.Claim(context.Background(), c.key, c.url, "site", "")
 		if !errors.Is(err, ErrBadRequest) {
 			t.Errorf("key len %d url %q: err = %v, want ErrBadRequest", len(c.key), c.url, err)
 		}
@@ -200,7 +205,7 @@ func TestClaimConcurrentOnlyOneWins(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			<-start
-			errs[i] = cs.Claim(context.Background(), keys[i], "http://a", "", "")
+			errs[i] = cs.Claim(context.Background(), keys[i], "http://a", "site", "")
 		}()
 	}
 	close(start)
@@ -246,7 +251,7 @@ func TestPopulatedUnclaimedRefusesWithoutToken(t *testing.T) {
 	if err := st.UpsertAccount(context.Background(), "acc1"); err != nil {
 		t.Fatal(err)
 	}
-	_, err := New(st, config.Config{}, clock)
+	_, err := New(st, config.Config{}, clock, discardLog)
 	if !errors.Is(err, ErrPopulatedUnclaimed) {
 		t.Fatalf("err = %v, want ErrPopulatedUnclaimed", err)
 	}
@@ -264,10 +269,10 @@ func TestPopulatedUnclaimedStartsWithToken(t *testing.T) {
 	if cs.Mode() != ModeUnclaimed {
 		t.Fatalf("mode = %q", cs.Mode())
 	}
-	if err := cs.Claim(context.Background(), goodKey, "http://a", "", ""); !errors.Is(err, ErrBadBootstrapToken) {
+	if err := cs.Claim(context.Background(), goodKey, "http://a", "site", ""); !errors.Is(err, ErrBadBootstrapToken) {
 		t.Fatalf("claim without token err = %v", err)
 	}
-	if err := cs.Claim(context.Background(), goodKey, "http://a", "", "boot"); err != nil {
+	if err := cs.Claim(context.Background(), goodKey, "http://a", "site", "boot"); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -280,7 +285,7 @@ func TestClaimRejectsCredentialedOrDecoratedURL(t *testing.T) {
 		"http://frappe:8080/?x=1",
 		"http://frappe:8080/#frag",
 	} {
-		err := cs.Claim(context.Background(), goodKey, u, "", "")
+		err := cs.Claim(context.Background(), goodKey, u, "site", "")
 		if !errors.Is(err, ErrBadRequest) {
 			t.Errorf("%q: err = %v, want ErrBadRequest", u, err)
 		}
@@ -295,7 +300,7 @@ const newKey = "n-ewkey-ewkey-ewkey-ewkey-ewkey-ew"
 func claimedState(t *testing.T, now *time.Time) (*State, *store.Store) {
 	t.Helper()
 	st := openStore(t)
-	cs, err := New(st, config.Config{}, func() time.Time { return *now })
+	cs, err := New(st, config.Config{}, func() time.Time { return *now }, discardLog)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -324,7 +329,7 @@ func TestRotateGraceWindow(t *testing.T) {
 	}
 	// The new key survives a restart; the grace does not.
 	now = fixedNow
-	again, err := New(st, config.Config{}, func() time.Time { return now })
+	again, err := New(st, config.Config{}, func() time.Time { return now }, discardLog)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -396,5 +401,89 @@ func TestDoubleRotationKeepsOnlyLatestGrace(t *testing.T) {
 	now = fixedNow.Add(3*time.Minute + RotationGrace + time.Second)
 	if cs.Authorized(newKey) || !cs.Authorized(keyC) {
 		t.Fatal("B must expire after its own grace; C stays")
+	}
+}
+
+func TestSiteNameValidated(t *testing.T) {
+	bad := []string{"", "crm example", "crm/x", "crm.example.com\n", strings.Repeat("a", 254)}
+	for _, site := range bad {
+		cs := newState(t, openStore(t), config.Config{})
+		if err := cs.Claim(context.Background(), goodKey, "http://a", site, ""); !errors.Is(err, ErrBadRequest) {
+			t.Errorf("claim site %q: err = %v", site, err)
+		}
+		if err := cs.CheckClaim(goodKey, "http://a", site, ""); !errors.Is(err, ErrBadRequest) {
+			t.Errorf("check claim site %q: err = %v", site, err)
+		}
+	}
+	now := fixedNow
+	cs, _ := claimedState(t, &now)
+	for _, site := range bad {
+		if err := cs.SetCallback(context.Background(), "http://a", site); !errors.Is(err, ErrBadRequest) {
+			t.Errorf("callback site %q: err = %v", site, err)
+		}
+		if err := cs.CheckCallback("http://a", site); !errors.Is(err, ErrBadRequest) {
+			t.Errorf("check callback site %q: err = %v", site, err)
+		}
+	}
+	for _, site := range []string{"crm.example.com", "whatsapp.localhost:8001", "10.0.0.1", strings.Repeat("a", 253)} {
+		if err := cs.CheckCallback("http://a", site); err != nil {
+			t.Errorf("site %q: err = %v", site, err)
+		}
+	}
+}
+
+// CheckClaim answers what Claim would, without claiming: the relay probes the
+// callback URL only for a claim that would otherwise succeed.
+func TestCheckClaimMirrorsClaimWithoutClaiming(t *testing.T) {
+	cs := newState(t, openStore(t), config.Config{BootstrapToken: "boot"})
+	if err := cs.CheckClaim(goodKey, "http://a", "site", "nope"); !errors.Is(err, ErrBadBootstrapToken) {
+		t.Fatalf("bad token: %v", err)
+	}
+	if err := cs.CheckClaim("short", "http://a", "site", "boot"); !errors.Is(err, ErrBadRequest) {
+		t.Fatalf("short key: %v", err)
+	}
+	if err := cs.CheckClaim(goodKey, "http://a", "site", "boot"); err != nil {
+		t.Fatalf("good: %v", err)
+	}
+	if cs.Mode() != ModeUnclaimed {
+		t.Fatal("CheckClaim must not claim")
+	}
+	if err := cs.Claim(context.Background(), goodKey, "http://a", "site", "boot"); err != nil {
+		t.Fatal(err)
+	}
+	if err := cs.CheckClaim(goodKey, "http://a", "site", "boot"); !errors.Is(err, ErrAlreadyClaimed) {
+		t.Fatalf("claimed: %v", err)
+	}
+	env := newState(t, openStore(t), config.Config{APIKey: "envkey"})
+	if err := env.CheckClaim(goodKey, "http://a", "site", ""); !errors.Is(err, ErrAlreadyClaimed) {
+		t.Fatalf("env: %v", err)
+	}
+	if err := env.CheckCallback("http://a", "site"); !errors.Is(err, ErrEnvMode) {
+		t.Fatalf("env callback: %v", err)
+	}
+}
+
+func TestNewWarnsWhenEnvKeyShadowsStoredClaim(t *testing.T) {
+	st := openStore(t)
+	if err := st.InsertRelayConfig(context.Background(), store.RelayConfig{APIKey: goodKey, CallbackURL: "http://stored", SiteName: "s", ClaimedAt: fixedNow}); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if _, err := New(st, config.Config{APIKey: "envkey-envkey-envkey-envkey-envkey"}, clock, slog.New(slog.NewJSONHandler(&buf, nil))); err != nil {
+		t.Fatal(err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, `"level":"WARN"`) || !strings.Contains(out, "RELAY_API_KEY") {
+		t.Fatalf("log = %s", out)
+	}
+	if strings.Contains(out, goodKey) || strings.Contains(out, "envkey-envkey") {
+		t.Fatal("log leaks a key")
+	}
+	buf.Reset()
+	if _, err := New(openStore(t), config.Config{APIKey: "envkey"}, clock, slog.New(slog.NewJSONHandler(&buf, nil))); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("no stored claim, yet logged: %s", buf.String())
 	}
 }

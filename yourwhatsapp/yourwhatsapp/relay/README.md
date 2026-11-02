@@ -27,7 +27,7 @@ RELAY_API_KEY=<key> FRAPPE_BASE_URL=http://127.0.0.1:8001 RELAY_PORT=8800 \
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `RELAY_API_KEY` | empty | Optional. When set, the relay is in **env mode**: the key comes from env and must equal `WhatsApp Settings.relay_api_key`. When empty, the relay uses its stored claim or waits to be claimed. |
+| `RELAY_API_KEY` | empty | Optional. When set, the relay is in **env mode**: the key comes from env and must equal `WhatsApp Settings.relay_api_key`. When empty, the relay uses its stored claim or waits to be claimed. A stored claim is ignored while it is set (the relay logs a warning at startup). |
 | `RELAY_BOOTSTRAP_TOKEN` | empty | Optional but recommended for unclaimed production relays: `POST /claim` must carry it as `bootstrap_token`. Use `python3 -c "import secrets;print(secrets.token_urlsafe(32))"`; `/claim` is not throttled. |
 | `FRAPPE_BASE_URL` | `http://127.0.0.1:8001` | Callback base URL, **env mode only** (a claimed relay uses the callback URL from its claim). Use `127.0.0.1`, since `.localhost` names do not resolve from the relay process. |
 | `FRAPPE_SITE_NAME` | empty | Env mode only: sent as the `Host` header on callbacks (e.g. `crm.example.com`). A claimed relay uses the claim's `site_name`. |
@@ -54,10 +54,12 @@ Every route except `/health`, `POST /claim` and `GET /info` needs the `x-api-key
 | Method & path | Notes |
 |---|---|
 | `GET /health` | `{"ok":true}`. No auth. |
-| `POST /claim` | Unclaimed only. Body `{api_key, callback_url, site_name, bootstrap_token?}` returns 200 `{"claimed":true}`. Errors: 409 `already_claimed`, 401 `bad_bootstrap_token`, 400 `bad_request` (key under 32 chars; callback URL not http(s), or carrying credentials, a query or a fragment). |
+| `POST /claim` | Unclaimed only. Body `{api_key, callback_url, site_name, bootstrap_token?}` returns 200 `{"claimed":true}`. Errors: 409 `already_claimed`, 401 `bad_bootstrap_token`, 400 `bad_request` (key under 32 chars; callback URL not http(s), or carrying credentials, a query or a fragment; `site_name` empty, over 253 chars, or not made of `A-Z a-z 0-9 . - :`), 413 for a body over 64 KB. Once the claim is otherwise valid, the relay first POSTs `<callback_url>/api/method/yourwhatsapp.yourwhatsapp.api.ping` with the candidate key and `Host: <site_name>` (10 s timeout); a non-2xx or no answer is 400 `callback_unreachable` with `detail` = the HTTP status (`http 404`) or an error class (`timeout`, `dns error`, `connection error`), and nothing is stored. |
 | `POST /claim/rotate` | Needs the **current** key. Body `{api_key}` (new, 32+ chars). The new key applies at once for auth and callbacks; the old key is still accepted for other routes for a 10-minute grace window, but cannot rotate or change the callback. Retrying a rotation the relay already applied (grace key plus the current key in the body) is a 200 no-op. 409 `env_mode`, 503 `unclaimed`, 401 bad key. |
-| `PUT /claim/callback` | Needs the current key. Body `{callback_url, site_name}`. 409 `env_mode`, 400 `bad_request`, 401. |
+| `PUT /claim/callback` | Needs the current key. Body `{callback_url, site_name}` (same rules and 64 KB cap as `/claim`). The new target is pinged with the current key first, as for `/claim`: 400 `callback_unreachable` keeps the old target. Also 409 `env_mode`, 400 `bad_request`, 401. The new target applies to callbacks already queued in the outbox too. |
 | `GET /info` | No key: `{version, claimed, mode}`. With a valid key (current or grace) also `sessions {connected, total}` (live connected sessions / linked numbers), `outbox {pending, dead}`, `callback_url` (credentials redacted) and `site_name`. Never returns a key. |
+| `GET /outbox/dead` | Up to 200 dead-lettered callbacks, oldest first. |
+| `POST /outbox/dead/replay` | Moves every dead-lettered callback back to the end of the outbox, in original order, with attempts reset. Returns `{"replayed": n}`. WhatsApp Settings shows **Relay → Replay Dead Callbacks** when `/info` reports dead rows. |
 | `POST /session/:id/start` | Optional `{"proxy": ...}` (`""` clears the stored proxy, absent/`null` keeps it). Creates the account if new; connects if paired, otherwise starts the QR flow. Idempotent: on a connected session it returns `connected` and pushes `Active` to Frappe again. |
 | `POST /session/:id/pair-code` | `{"phone": "+91 98765 43210"}` returns `{"code": "ABCD-1234"}`. Session must be unpaired. |
 | `GET /session/:id/status` | `{"status", "jid", "phone"}` |

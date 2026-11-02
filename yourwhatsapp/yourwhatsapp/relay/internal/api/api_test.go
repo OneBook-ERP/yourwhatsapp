@@ -58,16 +58,25 @@ func newServer(t *testing.T, fm *fakeManager) (http.Handler, *store.Store) {
 
 func newServerWith(t *testing.T, fm *fakeManager, cfg config.Config) (http.Handler, *store.Store, *claim.State) {
 	t.Helper()
+	return newServerFull(t, fm, cfg, reachable, func() {})
+}
+
+// reachable is a callback check that always passes.
+func reachable(context.Context, string, string, string) error { return nil }
+
+func newServerFull(t *testing.T, fm *fakeManager, cfg config.Config, check CallbackChecker, notify func()) (http.Handler, *store.Store, *claim.State) {
+	t.Helper()
 	st, err := store.Open(context.Background(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	cs, err := claim.New(st, cfg, time.Now)
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	cs, err := claim.New(st, cfg, time.Now, log)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return NewHandler(fm, st, cs, slog.New(slog.NewJSONHandler(io.Discard, nil)), "test"), st, cs
+	return NewHandler(fm, st, cs, log, "test", check, notify), st, cs
 }
 
 func do(h http.Handler, method, path, body string, auth bool) *httptest.ResponseRecorder {

@@ -40,7 +40,7 @@ func startupState(t *testing.T, row bool) *claim.State {
 			t.Fatal(err)
 		}
 	}
-	cs, err := claim.New(st, config.Config{}, time.Now)
+	cs, err := claim.New(st, config.Config{}, time.Now, slog.New(slog.NewJSONHandler(io.Discard, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -74,7 +74,7 @@ func TestStartupUnclaimedRestoresOnlyAfterClaim(t *testing.T) {
 		t.Fatal("unclaimed relay restored sessions")
 	default:
 	}
-	if err := cs.Claim(context.Background(), strings.Repeat("k", claim.MinKeyLen), "http://a", "", ""); err != nil {
+	if err := cs.Claim(context.Background(), strings.Repeat("k", claim.MinKeyLen), "http://a", "site", ""); err != nil {
 		t.Fatal(err)
 	}
 	select {
@@ -99,7 +99,7 @@ func TestClaimedSignal(t *testing.T) {
 		t.Fatal("unclaimed relay: signal closed early")
 	default:
 	}
-	if err := cs.Claim(context.Background(), strings.Repeat("k", claim.MinKeyLen), "http://a", "", ""); err != nil {
+	if err := cs.Claim(context.Background(), strings.Repeat("k", claim.MinKeyLen), "http://a", "site", ""); err != nil {
 		t.Fatal(err)
 	}
 	select {

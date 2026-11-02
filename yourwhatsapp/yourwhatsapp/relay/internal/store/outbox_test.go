@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -59,5 +60,47 @@ func TestOutboxKillMovesToDead(t *testing.T) {
 	dead, err := s.ListDead(ctx, 10)
 	if err != nil || len(dead) != 1 || dead[0].ID != h.ID || dead[0].Method != "a" || dead[0].LastError != "bad request" {
 		t.Fatalf("dead = %+v, %v", dead, err)
+	}
+}
+
+func TestReplayDeadMovesRowsToOutboxTailInOrder(t *testing.T) {
+	s, _ := openTemp(t)
+	ctx := context.Background()
+	for _, m := range []string{"dead1", "dead2", "live"} {
+		if err := s.EnqueueCallback(ctx, m, map[string]string{"m": m}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for range 2 {
+		h, _ := s.HeadCallback(ctx)
+		s.RetryCallback(ctx, h.ID, time.Now(), "boom")
+		if err := s.KillCallback(ctx, h.ID, "http 400"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := s.ReplayDead(ctx)
+	if err != nil || n != 2 {
+		t.Fatalf("ReplayDead = %d, %v", n, err)
+	}
+	if pending, dead, _ := s.OutboxCounts(ctx); pending != 3 || dead != 0 {
+		t.Fatalf("counts = %d pending, %d dead", pending, dead)
+	}
+	var got []string
+	for {
+		h, _ := s.HeadCallback(ctx)
+		if h == nil {
+			break
+		}
+		if h.Method != "live" && (h.Attempts != 0 || h.LastError != "" || string(h.Payload) != `{"m":"`+h.Method+`"}`) {
+			t.Errorf("replayed row = %+v", h)
+		}
+		got = append(got, h.Method)
+		s.DeleteCallback(ctx, h.ID)
+	}
+	if strings.Join(got, ",") != "live,dead1,dead2" {
+		t.Fatalf("order = %v", got)
+	}
+	if n, err := s.ReplayDead(ctx); err != nil || n != 0 {
+		t.Fatalf("empty replay = %d, %v", n, err)
 	}
 }

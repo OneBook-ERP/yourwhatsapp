@@ -8,7 +8,9 @@ import (
 	"crypto/subtle"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/url"
+	"regexp"
 	"sync"
 	"time"
 
@@ -63,15 +65,19 @@ type State struct {
 // New loads the relay's identity: env when cfg.APIKey is set, else the stored
 // claim, else unclaimed. An unclaimed store that already holds data is
 // refused unless a bootstrap token guards /claim.
-func New(st *store.Store, cfg config.Config, now func() time.Time) (*State, error) {
+func New(st *store.Store, cfg config.Config, now func() time.Time, log *slog.Logger) (*State, error) {
 	s := &State{st: st, bootstrapToken: cfg.BootstrapToken, now: now, mode: ModeUnclaimed}
-	if cfg.APIKey != "" {
-		s.mode, s.apiKey, s.callbackURL, s.siteName = ModeEnv, cfg.APIKey, cfg.FrappeBaseURL, cfg.FrappeSiteName
-		return s, nil
-	}
 	rc, err := st.GetRelayConfig(context.Background())
 	if err != nil {
 		return nil, fmt.Errorf("load relay config: %w", err)
+	}
+	if cfg.APIKey != "" {
+		if rc != nil {
+			log.Warn("RELAY_API_KEY is set, so the stored claim is ignored; unset it to use the claim",
+				"stored_site_name", rc.SiteName)
+		}
+		s.mode, s.apiKey, s.callbackURL, s.siteName = ModeEnv, cfg.APIKey, cfg.FrappeBaseURL, cfg.FrappeSiteName
+		return s, nil
 	}
 	if rc != nil {
 		s.mode, s.apiKey, s.callbackURL, s.siteName = ModeClaimed, rc.APIKey, rc.CallbackURL, rc.SiteName
@@ -152,14 +158,18 @@ func (s *State) Rotate(ctx context.Context, newKey string) error {
 	return nil
 }
 
+// CheckCallback answers what SetCallback would, without changing anything.
+func (s *State) CheckCallback(callbackURL, siteName string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.checkCallback(callbackURL, siteName)
+}
+
 // SetCallback changes where callbacks go, with the same URL rules as Claim.
 func (s *State) SetCallback(ctx context.Context, callbackURL, siteName string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if err := s.requireStored(); err != nil {
-		return err
-	}
-	if err := validateCallback(callbackURL); err != nil {
+	if err := s.checkCallback(callbackURL, siteName); err != nil {
 		return err
 	}
 	if err := s.st.UpdateRelayCallback(ctx, callbackURL, siteName); err != nil {
@@ -167,6 +177,14 @@ func (s *State) SetCallback(ctx context.Context, callbackURL, siteName string) e
 	}
 	s.callbackURL, s.siteName = callbackURL, siteName
 	return nil
+}
+
+// Caller holds mu.
+func (s *State) checkCallback(callbackURL, siteName string) error {
+	if err := s.requireStored(); err != nil {
+		return err
+	}
+	return validateTarget(callbackURL, siteName)
 }
 
 // requireStored: only a claimed (stored) identity can change. Caller holds mu.
@@ -207,16 +225,33 @@ func (s *State) Claim(ctx context.Context, apiKey, callbackURL, siteName, bootst
 	return nil
 }
 
+// CheckClaim answers what Claim would, without claiming: the API checks a
+// claim before probing its callback URL, so nobody can make an unclaimable
+// relay send requests.
+func (s *State) CheckClaim(apiKey, callbackURL, siteName, bootstrapToken string) error {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.checkClaim(apiKey, callbackURL, siteName, bootstrapToken)
+}
+
+// Caller holds mu.
+func (s *State) checkClaim(apiKey, callbackURL, siteName, bootstrapToken string) error {
+	if s.mode != ModeUnclaimed {
+		return ErrAlreadyClaimed
+	}
+	if s.bootstrapToken != "" && subtle.ConstantTimeCompare([]byte(bootstrapToken), []byte(s.bootstrapToken)) != 1 {
+		return ErrBadBootstrapToken
+	}
+	if err := validateKey(apiKey); err != nil {
+		return err
+	}
+	return validateTarget(callbackURL, siteName)
+}
+
 func (s *State) claim(ctx context.Context, apiKey, callbackURL, siteName, bootstrapToken string) ([]func(), error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.mode != ModeUnclaimed {
-		return nil, ErrAlreadyClaimed
-	}
-	if s.bootstrapToken != "" && subtle.ConstantTimeCompare([]byte(bootstrapToken), []byte(s.bootstrapToken)) != 1 {
-		return nil, ErrBadBootstrapToken
-	}
-	if err := validate(apiKey, callbackURL); err != nil {
+	if err := s.checkClaim(apiKey, callbackURL, siteName, bootstrapToken); err != nil {
 		return nil, err
 	}
 	rc := store.RelayConfig{APIKey: apiKey, CallbackURL: callbackURL, SiteName: siteName, ClaimedAt: s.now()}
@@ -232,11 +267,21 @@ func (s *State) claim(ctx context.Context, apiKey, callbackURL, siteName, bootst
 	return hooks, nil
 }
 
-func validate(apiKey, callbackURL string) error {
-	if err := validateKey(apiKey); err != nil {
+// siteNamePattern: a host name, optionally with a port, as Frappe sends it in Host.
+var siteNamePattern = regexp.MustCompile(`^[A-Za-z0-9.:-]+$`)
+
+// MaxSiteNameLen is the longest DNS name.
+const MaxSiteNameLen = 253
+
+func validateTarget(callbackURL, siteName string) error {
+	if err := validateCallback(callbackURL); err != nil {
 		return err
 	}
-	return validateCallback(callbackURL)
+	if len(siteName) > MaxSiteNameLen || !siteNamePattern.MatchString(siteName) {
+		return fmt.Errorf("%w: site_name must be a host name (letters, digits, '.', '-', ':'; at most %d characters)",
+			ErrBadRequest, MaxSiteNameLen)
+	}
+	return nil
 }
 
 // The validators never echo the key or the URL: errors may reach the caller and the log.

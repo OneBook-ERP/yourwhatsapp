@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -9,6 +10,7 @@ import (
 
 	"yourwhatsapp/relay/internal/claim"
 	"yourwhatsapp/relay/internal/config"
+	"yourwhatsapp/relay/internal/outbox"
 )
 
 var claimKey = strings.Repeat("c", claim.MinKeyLen)
@@ -284,4 +286,139 @@ func TestGraceKeyRotateToCurrentKeyIsIdempotent(t *testing.T) {
 	if !cs.Authorized(claimKey) || cs.AuthorizedCurrent(claimKey) {
 		t.Fatal("retry must leave the old key as grace only, window unchanged")
 	}
+}
+
+// checkRecorder records callback checks and fails them with err.
+type checkRecorder struct {
+	calls          int
+	url, site, key string
+	err            error
+}
+
+func (c *checkRecorder) check(_ context.Context, url, site, key string) error {
+	c.calls++
+	c.url, c.site, c.key = url, site, key
+	return c.err
+}
+
+func TestClaimProbesCallbackWithCandidateKey(t *testing.T) {
+	rec := &checkRecorder{}
+	h, _, cs := newServerFull(t, &fakeManager{}, config.Config{}, rec.check, func() {})
+	if r := do(h, "POST", "/claim", claimJSON(claimKey, "http://frontend:8080", ""), false); r.Code != 200 {
+		t.Fatalf("claim = %d %s", r.Code, r.Body)
+	}
+	if rec.calls != 1 || rec.url != "http://frontend:8080" || rec.site != "crm.example.com" || rec.key != claimKey {
+		t.Fatalf("check = %+v", rec)
+	}
+	if cs.Mode() != claim.ModeClaimed {
+		t.Fatal("not claimed")
+	}
+}
+
+func TestClaimUnreachableCallback400(t *testing.T) {
+	rec := &checkRecorder{err: &outbox.UnreachableError{Detail: "http 404"}}
+	h, st, cs := newServerFull(t, &fakeManager{}, config.Config{}, rec.check, func() {})
+	r := do(h, "POST", "/claim", claimJSON(claimKey, "http://frontend:8080", ""), false)
+	m := decode(t, r)
+	if r.Code != 400 || m["error"] != "callback_unreachable" || m["detail"] != "http 404" {
+		t.Fatalf("claim = %d %s", r.Code, r.Body)
+	}
+	if strings.Contains(r.Body.String(), claimKey) {
+		t.Fatal("response leaks the key")
+	}
+	if rc, _ := st.GetRelayConfig(context.Background()); rc != nil || cs.Mode() != claim.ModeUnclaimed {
+		t.Fatal("an unreachable callback must leave the relay unclaimed")
+	}
+	rec.err = errors.New("dial tcp: secret detail " + claimKey)
+	r = do(h, "POST", "/claim", claimJSON(claimKey, "http://frontend:8080", ""), false)
+	if r.Code != 400 || decode(t, r)["detail"] != "request error" || strings.Contains(r.Body.String(), claimKey) {
+		t.Fatalf("plain error = %d %s", r.Code, r.Body)
+	}
+}
+
+// A claim refused for any other reason never makes the relay send a request.
+func TestRefusedClaimDoesNotProbe(t *testing.T) {
+	for name, c := range map[string]struct {
+		cfg  config.Config
+		body string
+	}{
+		"env":       {config.Config{APIKey: testKey}, claimJSON(claimKey, "http://a", "")},
+		"token":     {config.Config{BootstrapToken: "boot"}, claimJSON(claimKey, "http://a", "wrong")},
+		"short key": {config.Config{}, claimJSON("short", "http://a", "")},
+		"bad site":  {config.Config{}, `{"api_key":"` + claimKey + `","callback_url":"http://a","site_name":"a b"}`},
+	} {
+		rec := &checkRecorder{}
+		h, _, _ := newServerFull(t, &fakeManager{}, c.cfg, rec.check, func() {})
+		if r := do(h, "POST", "/claim", c.body, false); r.Code == 200 || rec.calls != 0 {
+			t.Errorf("%s: %d, %d checks", name, r.Code, rec.calls)
+		}
+	}
+}
+
+func TestSetCallbackProbesWithCurrentKey(t *testing.T) {
+	rec := &checkRecorder{}
+	h, _, cs := newServerFull(t, &fakeManager{}, config.Config{}, rec.check, func() {})
+	do(h, "POST", "/claim", claimJSON(claimKey, "http://127.0.0.1:8001", ""), false)
+	rec.err = &outbox.UnreachableError{Detail: "timeout"}
+	r := doKeyBody(h, "PUT", "/claim/callback", `{"callback_url":"http://frontend:8080","site_name":"crm.example.com"}`, claimKey)
+	if r.Code != 400 || decode(t, r)["error"] != "callback_unreachable" || decode(t, r)["detail"] != "timeout" {
+		t.Fatalf("callback = %d %s", r.Code, r.Body)
+	}
+	if rec.url != "http://frontend:8080" || rec.site != "crm.example.com" || rec.key != claimKey {
+		t.Fatalf("check = %+v", rec)
+	}
+	if u, _, _ := cs.Target(); u != "http://127.0.0.1:8001" {
+		t.Fatalf("callback changed to %q", u)
+	}
+	rec.err = nil
+	if r := doKeyBody(h, "PUT", "/claim/callback", `{"callback_url":"http://frontend:8080","site_name":"crm.example.com"}`, claimKey); r.Code != 200 {
+		t.Fatalf("reachable callback = %d", r.Code)
+	}
+	rec.calls = 0
+	if r := doKeyBody(h, "PUT", "/claim/callback", `{"callback_url":"ftp://x","site_name":"s"}`, claimKey); r.Code != 400 || rec.calls != 0 {
+		t.Fatalf("bad callback = %d, %d checks", r.Code, rec.calls)
+	}
+}
+
+func TestClaimRoutesCapBodyAt64KB(t *testing.T) {
+	big := `{"api_key":"` + strings.Repeat("k", 65<<10) + `"}`
+	h, _, _ := newServerWith(t, &fakeManager{}, config.Config{})
+	if r := do(h, "POST", "/claim", big, false); r.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("/claim = %d", r.Code)
+	}
+	do(h, "POST", "/claim", claimJSON(claimKey, "http://a", ""), false)
+	for _, route := range []struct{ method, path string }{{"POST", "/claim/rotate"}, {"PUT", "/claim/callback"}} {
+		if r := doKeyBody(h, route.method, route.path, big, claimKey); r.Code != http.StatusRequestEntityTooLarge {
+			t.Errorf("%s = %d", route.path, r.Code)
+		}
+	}
+}
+
+func TestReplayDeadRoute(t *testing.T) {
+	notified := 0
+	h, st, _ := newServerFull(t, &fakeManager{}, config.Config{APIKey: testKey}, reachable, func() { notified++ })
+	ctx := context.Background()
+	for _, m := range []string{"a", "b"} {
+		st.EnqueueCallback(ctx, m, map[string]int{})
+		head, _ := st.HeadCallback(ctx)
+		st.KillCallback(ctx, head.ID, "http 400")
+	}
+	if r := do(h, "POST", "/outbox/dead/replay", "", false); r.Code != 401 {
+		t.Fatalf("unauthenticated = %d", r.Code)
+	}
+	r := do(h, "POST", "/outbox/dead/replay", "", true)
+	if r.Code != 200 || decode(t, r)["replayed"] != float64(2) || notified != 1 {
+		t.Fatalf("replay = %d %s, notified %d", r.Code, r.Body, notified)
+	}
+	if pending, dead, _ := st.OutboxCounts(ctx); pending != 2 || dead != 0 {
+		t.Fatalf("counts = %d / %d", pending, dead)
+	}
+}
+
+func doKeyBody(h http.Handler, method, path, body, key string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("x-api-key", key)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
 }

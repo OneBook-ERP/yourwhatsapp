@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"yourwhatsapp/relay/internal/claim"
+	"yourwhatsapp/relay/internal/outbox"
 	"yourwhatsapp/relay/internal/phone"
 	"yourwhatsapp/relay/internal/session"
 	"yourwhatsapp/relay/internal/store"
@@ -19,8 +20,14 @@ import (
 
 const (
 	maxBodyBytes = 25 << 20
-	deadLimit    = 200
+	// maxClaimBodyBytes bounds the claim routes, which carry only a few short strings.
+	maxClaimBodyBytes = 64 << 10
+	deadLimit         = 200
 )
+
+// CallbackChecker proves Frappe answers at callbackURL for siteName and
+// accepts apiKey (outbox.Ping). Its error must not carry the key.
+type CallbackChecker func(ctx context.Context, callbackURL, siteName, apiKey string) error
 
 // Manager is the subset of *session.Manager the API drives.
 type Manager interface {
@@ -40,12 +47,16 @@ type handler struct {
 	cs      *claim.State
 	log     *slog.Logger
 	version string
+	check   CallbackChecker
+	// notify wakes the outbox worker.
+	notify func()
 }
 
 // NewHandler returns the relay's HTTP handler. Every route but /health,
 // /claim and /info needs x-api-key, and answers 503 unclaimed until the relay is claimed.
-func NewHandler(m Manager, st *store.Store, cs *claim.State, log *slog.Logger, version string) http.Handler {
-	h := &handler{m: m, st: st, cs: cs, log: log, version: version}
+func NewHandler(m Manager, st *store.Store, cs *claim.State, log *slog.Logger, version string,
+	check CallbackChecker, notify func()) http.Handler {
+	h := &handler{m: m, st: st, cs: cs, log: log, version: version, check: check, notify: notify}
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /health", func(w http.ResponseWriter, _ *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
@@ -62,6 +73,7 @@ func NewHandler(m Manager, st *store.Store, cs *claim.State, log *slog.Logger, v
 	mux.Handle("POST /session/{id}/logout", h.auth(h.logout))
 	mux.Handle("POST /message/send", h.auth(h.send))
 	mux.Handle("GET /outbox/dead", h.auth(h.deadList))
+	mux.Handle("POST /outbox/dead/replay", h.auth(h.deadReplay))
 	return mux
 }
 
@@ -95,10 +107,17 @@ type claimBody struct {
 
 func (h *handler) claim(w http.ResponseWriter, r *http.Request) {
 	var b claimBody
-	if !decodeBody(w, r, &b, false) {
+	if !decodeBodyLimit(w, r, &b, false, maxClaimBodyBytes) {
 		return
 	}
-	err := h.cs.Claim(r.Context(), b.APIKey, b.CallbackURL, b.SiteName, b.BootstrapToken)
+	// Checked first: a claim that would be refused anyway never makes the relay send a request.
+	err := h.cs.CheckClaim(b.APIKey, b.CallbackURL, b.SiteName, b.BootstrapToken)
+	if err == nil && !h.callbackReachable(w, r, b.CallbackURL, b.SiteName, b.APIKey) {
+		return
+	}
+	if err == nil {
+		err = h.cs.Claim(r.Context(), b.APIKey, b.CallbackURL, b.SiteName, b.BootstrapToken)
+	}
 	switch {
 	case err == nil:
 		h.log.Info("relay claimed", "callback_url", redactedURL(b.CallbackURL), "site_name", b.SiteName)
@@ -119,7 +138,7 @@ func (h *handler) rotate(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		APIKey string `json:"api_key"`
 	}
-	if !decodeBody(w, r, &b, false) {
+	if !decodeBodyLimit(w, r, &b, false, maxClaimBodyBytes) {
 		return
 	}
 	// Only the current key may rotate. The grace key may repeat a rotation
@@ -144,7 +163,13 @@ func (h *handler) setCallback(w http.ResponseWriter, r *http.Request) {
 		CallbackURL string `json:"callback_url"`
 		SiteName    string `json:"site_name"`
 	}
-	if !decodeBody(w, r, &b, false) {
+	if !decodeBodyLimit(w, r, &b, false, maxClaimBodyBytes) {
+		return
+	}
+	if !h.claimChange(w, r, h.cs.CheckCallback(b.CallbackURL, b.SiteName)) {
+		return
+	}
+	if !h.callbackReachable(w, r, b.CallbackURL, b.SiteName, r.Header.Get("x-api-key")) {
 		return
 	}
 	if !h.claimChange(w, r, h.cs.SetCallback(r.Context(), b.CallbackURL, b.SiteName)) {
@@ -152,6 +177,23 @@ func (h *handler) setCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	h.log.Info("callback updated", "callback_url", redactedURL(b.CallbackURL), "site_name", b.SiteName)
 	writeJSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// callbackReachable pings Frappe at a candidate callback target with the key
+// callbacks would carry, answering 400 callback_unreachable itself when it fails.
+func (h *handler) callbackReachable(w http.ResponseWriter, r *http.Request, callbackURL, siteName, apiKey string) bool {
+	err := h.check(r.Context(), callbackURL, siteName, apiKey)
+	if err == nil {
+		return true
+	}
+	detail := "request error"
+	var ue *outbox.UnreachableError
+	if errors.As(err, &ue) {
+		detail = ue.Detail
+	}
+	h.log.Warn("callback target unreachable", "callback_url", redactedURL(callbackURL), "site_name", siteName, "detail", detail)
+	writeError(w, http.StatusBadRequest, "callback_unreachable", detail)
+	return false
 }
 
 // claimChange answers for a failed rotate/callback change and reports whether it succeeded.
@@ -328,6 +370,18 @@ func (h *handler) deadList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+// deadReplay moves every dead-lettered callback back to the outbox tail, oldest first.
+func (h *handler) deadReplay(w http.ResponseWriter, r *http.Request) {
+	n, err := h.st.ReplayDead(r.Context())
+	if err != nil {
+		h.fail(w, r, err)
+		return
+	}
+	h.notify()
+	h.log.Info("dead callbacks replayed", "count", n)
+	writeJSON(w, http.StatusOK, map[string]any{"replayed": n})
+}
+
 // fail maps a manager error onto the response; unexpected errors are logged, not echoed.
 func (h *handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 	switch {
@@ -348,7 +402,11 @@ func (h *handler) fail(w http.ResponseWriter, r *http.Request, err error) {
 // decodeBody reads a size-limited JSON body into dst, answering 413/400 itself on failure.
 // With optional, an empty body is accepted.
 func decodeBody(w http.ResponseWriter, r *http.Request, dst any, optional bool) bool {
-	r.Body = http.MaxBytesReader(w, r.Body, maxBodyBytes)
+	return decodeBodyLimit(w, r, dst, optional, maxBodyBytes)
+}
+
+func decodeBodyLimit(w http.ResponseWriter, r *http.Request, dst any, optional bool, limit int64) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, limit)
 	err := json.NewDecoder(r.Body).Decode(dst)
 	if err == nil || (optional && errors.Is(err, io.EOF)) {
 		return true

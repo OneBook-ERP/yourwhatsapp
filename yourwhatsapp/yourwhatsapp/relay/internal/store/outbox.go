@@ -118,3 +118,25 @@ func (s *Store) OutboxCounts(ctx context.Context) (pending, dead int, err error)
 		`SELECT (SELECT COUNT(*) FROM outbox), (SELECT COUNT(*) FROM outbox_dead)`).Scan(&pending, &dead)
 	return pending, dead, err
 }
+
+// ReplayDead moves every dead-lettered row back to the tail of the outbox, in
+// their original id order, as fresh rows (no attempts, due now). It returns how many moved.
+func (s *Store) ReplayDead(ctx context.Context) (int, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, `INSERT INTO outbox (method, payload) SELECT method, payload FROM outbox_dead ORDER BY id`)
+	if err != nil {
+		return 0, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.ExecContext(ctx, `DELETE FROM outbox_dead`); err != nil {
+		return 0, err
+	}
+	return int(n), tx.Commit()
+}
