@@ -68,15 +68,35 @@ class AlertsTestCase(LiveSafeTestCase):
 		self.assertNotIn(other, found)
 		self.assertNotIn("Guest", found)
 
-	def test_administrator_only_with_email(self):
-		for email in (None, "admin@example.com"):
-			with patch.object(frappe.db, "get_value", wraps=frappe.db.get_value) as get_value:
-				get_value.side_effect = lambda doctype, name=None, *a, **k: (
-					(1, email) if name == "Administrator" and doctype == "User" else frappe.db.get_value.__wrapped__(doctype, name, *a, **k)
-				)
-				self.assertNotIn("Administrator", alerts.alert_recipients())
-		with patch.object(alerts, "_administrator_email", return_value="boss@company.test"):
+	def test_administrator_gets_bell_whenever_enabled(self):
+		with patch.object(alerts, "_administrator_enabled", return_value=True):
 			self.assertIn("Administrator", alerts.alert_recipients())
+		with patch.object(alerts, "_administrator_enabled", return_value=False):
+			self.assertNotIn("Administrator", alerts.alert_recipients())
+
+	def test_administrator_emailed_only_with_real_address(self):
+		for email, emailed in ((None, False), ("admin@example.com", False), ("boss@company.test", True)):
+			with self.subTest(email=email):
+				self.sendmail.reset_mock()
+				addresses = {self.recipients: self.recipients, "Administrator": email}
+				with patch.object(alerts, "_administrator_enabled", return_value=True), patch.object(
+					alerts, "_stored_email", side_effect=lambda user: addresses.get(user)
+				):
+					alerts._notify(self.account, "subject", "detail")
+				self.assertIn("Administrator", [b.for_user for b in self._bells()])
+				sent_to = self.sendmail.call_args.kwargs["recipients"]
+				self.assertEqual("boss@company.test" in sent_to, emailed)
+				self.assertNotIn("admin@example.com", sent_to)
+				frappe.db.delete("Notification Log", {"document_name": self.account})
+
+	def test_no_recipients_logged_once_a_day(self):
+		with patch.object(alerts, "alert_recipients", return_value=[]):
+			alerts._notify(self.account, "subject", "detail")
+			alerts._notify(self.account, "subject", "detail")
+		self.assertEqual(self._bells(), [])
+		self.sendmail.assert_not_called()
+		self.log_error_mock.assert_called_once()
+		self.assertIn("give a user System Manager or WhatsApp Admin", self.log_error_mock.call_args.kwargs["message"])
 
 	def test_flap_throttled(self):
 		alerts.account_status_changed(self.account, "Active", "Disconnected")
@@ -141,7 +161,7 @@ class AlertsTestCase(LiveSafeTestCase):
 
 	def test_recipient_without_email_gets_bell_only(self):
 		no_email = self._make_user("alert-noemail@example.test", "WhatsApp Admin")
-		with patch.object(alerts, "_user_email", side_effect=lambda user: None if user == no_email else user):
+		with patch.object(alerts, "_stored_email", side_effect=lambda user: None if user == no_email else user):
 			alerts.account_status_changed(self.account, "Active", "Disconnected")
 		self.assertIn(no_email, [b.for_user for b in self._bells()])
 		self.assertNotIn(no_email, self.sendmail.call_args.kwargs["recipients"])

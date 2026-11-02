@@ -11,12 +11,13 @@ from frappe.utils import escape_html, get_url_to_form
 ALERT_ROLES = ("System Manager", "WhatsApp Admin")
 DOWN_THROTTLE_SECONDS = 15 * 60
 MANUAL_SECONDS = 5 * 60
-NO_EMAIL_LOG_SECONDS = 24 * 60 * 60
+LOG_ONCE_SECONDS = 24 * 60 * 60
 DOWN_SENT_SECONDS = 30 * 24 * 60 * 60
 KEY_PREFIX = "yourwhatsapp:alert:"
 KEY_KINDS = ("down", "down_sent", "manual")
-NO_EMAIL_LOGGED_ACCOUNT = "_all"
+SITE_KEY_ACCOUNT = "_all"  # alert_key() owner for site-wide notes
 NO_EMAIL_LOGGED_KIND = "no_email_logged"
+NO_RECIPIENTS_LOGGED_KIND = "no_recipients_logged"
 
 
 def alert_key(account: str, kind: str) -> str:
@@ -55,7 +56,8 @@ def report_down(account: str, status: str, reason: str) -> None:
 
 
 def alert_recipients() -> list[str]:
-	"""Enabled System Manager / WhatsApp Admin users; Administrator only with an email."""
+	"""Enabled System Manager / WhatsApp Admin users, and Administrator while enabled.
+	Who gets an email as well is decided per address (_user_email)."""
 	users = frappe.get_all(
 		"Has Role",
 		filters={"role": ("in", ALERT_ROLES), "parenttype": "User"},
@@ -64,7 +66,7 @@ def alert_recipients() -> list[str]:
 	)
 	enabled = frappe.get_all("User", filters={"name": ("in", users), "enabled": 1}, pluck="name") if users else []
 	recipients = {user for user in enabled if user not in ("Guest", "Administrator")}
-	if _administrator_email():
+	if _administrator_enabled():
 		recipients.add("Administrator")
 	return sorted(recipients)
 
@@ -73,15 +75,19 @@ def has_outgoing_email_account() -> bool:
 	return bool(frappe.db.exists("Email Account", {"default_outgoing": 1, "enable_outgoing": 1}))
 
 
-def _administrator_email() -> str | None:
-	"""Administrator's address if it is enabled and real (the install default admin@example.com is not)."""
-	enabled, email = frappe.db.get_value("User", "Administrator", ["enabled", "email"]) or (0, None)
-	if not enabled or not email or email.lower().endswith("@example.com"):
+def _administrator_enabled() -> bool:
+	return bool(frappe.db.get_value("User", "Administrator", "enabled"))
+
+
+def _user_email(user: str) -> str | None:
+	"""A real address only: the install default admin@example.com would bounce."""
+	email = _stored_email(user)
+	if not email or email.lower().endswith("@example.com"):
 		return None
 	return email
 
 
-def _user_email(user: str) -> str | None:
+def _stored_email(user: str) -> str | None:
 	return frappe.db.get_value("User", user, "email")
 
 
@@ -108,6 +114,11 @@ def _send_recovery(account: str, old: str | None):
 def _notify(account: str, subject: str, detail: str):
 	recipients = alert_recipients()
 	if not recipients:
+		_log_once_a_day(
+			NO_RECIPIENTS_LOGGED_KIND,
+			"WhatsApp health alert has no recipients",
+			"No WhatsApp alert recipients — give a user System Manager or WhatsApp Admin.",
+		)
 		return
 	link = get_url_to_form("WhatsApp Account", account)
 	for user in recipients:
@@ -130,7 +141,11 @@ def _email(recipients: list[str], subject: str, detail: str, link: str):
 	if not addresses:
 		return
 	if not has_outgoing_email_account():
-		_log_no_email_account_once()
+		_log_once_a_day(
+			NO_EMAIL_LOGGED_KIND,
+			"WhatsApp health alert not emailed",
+			"No default outgoing Email Account is enabled, so WhatsApp health alerts only reach the bell.",
+		)
 		return
 	open_label = _("Open the account")
 	message = (
@@ -140,15 +155,12 @@ def _email(recipients: list[str], subject: str, detail: str, link: str):
 	frappe.sendmail(recipients=addresses, subject=subject, message=message, now=False)
 
 
-def _log_no_email_account_once():
-	key = alert_key(NO_EMAIL_LOGGED_ACCOUNT, NO_EMAIL_LOGGED_KIND)
+def _log_once_a_day(kind: str, title: str, message: str):
+	key = alert_key(SITE_KEY_ACCOUNT, kind)
 	if frappe.cache.get_value(key):
 		return
-	frappe.cache.set_value(key, 1, expires_in_sec=NO_EMAIL_LOG_SECONDS)
-	frappe.log_error(
-		title="WhatsApp health alert not emailed",
-		message="No default outgoing Email Account is enabled, so WhatsApp health alerts only reach the bell.",
-	)
+	frappe.cache.set_value(key, 1, expires_in_sec=LOG_ONCE_SECONDS)
+	frappe.log_error(title=title, message=message)
 
 
 def _safely(account: str, send, *args):
