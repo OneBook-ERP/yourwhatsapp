@@ -540,13 +540,14 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.stopBanTimer()
+			s.stopTimers()
 			if s.queue != nil {
 				s.queue.shutdown(inFlightWait)
 			}
 			if s.cancel != nil {
 				s.cancel()
 			}
+			s.stopTimers() // again: an event may have armed one before cancel
 			if s.client != nil {
 				s.client.Disconnect()
 			}
@@ -677,7 +678,7 @@ func (m *Manager) retire(s *Session) {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	s.stopBanTimer()
+	s.stopTimers()
 	if s.queue != nil {
 		for _, job := range s.queue.shutdown(inFlightWait) {
 			s.finishFailed(job, CodeSessionUnavailable, "session stopped")

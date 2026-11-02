@@ -100,6 +100,15 @@ type Session struct {
 	banUntil time.Time
 	stopBan  func() bool
 	numbers  map[string]numberEntry
+
+	// Reconnect loop and disconnect grace period (reconnect.go). A *Gen
+	// counter tells a timer that fired after being replaced to do nothing.
+	retryStop    func() bool
+	retryGen     int
+	retryAttempt int
+	downStop     func() bool
+	downGen      int
+	downReported bool
 }
 
 func (s *Session) Status() string {
@@ -142,11 +151,10 @@ func (s *Session) stopBanTimer() {
 	}
 }
 
-// connect dials a paired device; Connected arrives later as an event.
+// connect dials a paired device; Connected arrives later as an event. A
+// failed dial is retried in the background (reconnect.go).
 func (s *Session) connect() (string, error) {
-	s.setStatus(StatusConnecting)
-	if err := s.client.Connect(); err != nil {
-		s.setStatus(StatusDisconnected)
+	if err := s.dial(); err != nil {
 		return StatusDisconnected, err
 	}
 	return s.Status(), nil
@@ -277,7 +285,7 @@ func (s *Session) handleEvent(evt any) {
 	case *events.ClientOutdated:
 		s.onConnectionLost("client outdated: whatsmeow needs upgrading")
 	case *events.Disconnected:
-		s.log.Info("socket disconnected; auto-reconnect will retry")
+		s.onSocketDropped()
 	case *events.Message:
 		s.onMessage(e)
 	case *events.Receipt:
@@ -292,6 +300,7 @@ func (s *Session) becomeConnected() {
 	prev := s.status
 	s.status = StatusConnected
 	s.banUntil = time.Time{}
+	s.stopReconnectLocked()
 	s.mu.Unlock()
 	if prev != StatusConnected {
 		s.log.Info("connected")
@@ -321,7 +330,7 @@ func (s *Session) onLoggedOut(e *events.LoggedOut) {
 	if err := s.m.st.SetAccountJID(ctx, s.id, ""); err != nil {
 		s.log.Error("clear jid after logout", "error", err)
 	}
-	s.stopBanTimer()
+	s.stopTimers()
 	s.mu.Lock()
 	s.status = StatusLoggedOut
 	s.jid = types.EmptyJID
@@ -332,18 +341,29 @@ func (s *Session) onLoggedOut(e *events.LoggedOut) {
 
 func (s *Session) onStreamReplaced() {
 	s.log.Error("stream replaced: another client connected with this account's keys; not reconnecting")
+	s.stopReconnect()
 	s.client.Disconnect()
 	s.setStatus(StatusDisconnected)
 	s.pushStatus(frappeDisconnected)
 }
 
 // onConnectionLost handles failures after which whatsmeow does not reconnect
-// on its own (LoggedOut and TemporaryBan have their own events). The session
-// becomes disconnected, so the next Start rebuilds it.
+// on its own (LoggedOut and TemporaryBan have their own events): the relay
+// retries, and tells Frappe only if the session stays down (reconnect.go).
 func (s *Session) onConnectionLost(msg string, attrs ...any) {
-	s.log.Error(msg+"; not reconnecting", attrs...)
-	if prev := s.setStatus(StatusDisconnected); prev != StatusDisconnected {
-		s.pushStatus(frappeDisconnected)
+	s.log.Error(msg, attrs...)
+	s.setStatus(StatusDisconnected)
+	s.armDownTimer()
+	s.scheduleReconnect()
+}
+
+// onSocketDropped: whatsmeow auto-reconnects a dropped socket itself; Frappe
+// is told only if that takes longer than the grace period.
+func (s *Session) onSocketDropped() {
+	s.log.Info("socket disconnected; auto-reconnect will retry")
+	switch s.Status() {
+	case StatusConnected, StatusConnecting:
+		s.armDownTimer()
 	}
 }
 
@@ -353,7 +373,7 @@ func (s *Session) onTemporaryBan(e *events.TemporaryBan) {
 		wait = unknownBanExpiry
 	}
 	until := s.m.now().Add(wait).UTC()
-	s.stopBanTimer()
+	s.stopTimers()
 	stop := s.m.afterFunc(wait, s.reconnectAfterBan)
 	s.mu.Lock()
 	s.status = StatusTempBanned
@@ -366,7 +386,8 @@ func (s *Session) onTemporaryBan(e *events.TemporaryBan) {
 	})
 }
 
-// reconnectAfterBan runs when the ban expires; Connected then pushes Active.
+// reconnectAfterBan runs when the ban expires; Connected then pushes Active,
+// and a failed dial joins the reconnect loop.
 func (s *Session) reconnectAfterBan() {
 	unlock := s.m.lockID(s.id)
 	defer unlock()
@@ -374,10 +395,8 @@ func (s *Session) reconnectAfterBan() {
 		return
 	}
 	s.log.Info("ban expired; reconnecting")
-	if err := s.client.Connect(); err != nil {
+	if err := s.dial(); err != nil {
 		s.log.Error("reconnect after ban", "error", err)
-		s.setStatus(StatusDisconnected)
-		s.pushStatus(frappeDisconnected)
 	}
 }
 

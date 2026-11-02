@@ -50,7 +50,8 @@ type fakeClient struct {
 	downloadErr error
 	downloads   int
 	pairPhone   string
-	afterSend   func(id string) // run on its own goroutine, like whatsmeow's handler queue
+	afterSend   func(id string)   // run on its own goroutine, like whatsmeow's handler queue
+	connectErr  func(n int) error // n counts Connect calls from 1; non-nil fails that call
 }
 
 func newFakeClient(dev *wastore.Device) *fakeClient {
@@ -64,6 +65,12 @@ func newFakeClient(dev *wastore.Device) *fakeClient {
 func (f *fakeClient) Connect() error {
 	f.mu.Lock()
 	f.connects++
+	if f.connectErr != nil {
+		if err := f.connectErr(f.connects); err != nil {
+			f.mu.Unlock()
+			return err
+		}
+	}
 	f.connected = true
 	qr := f.qr
 	f.mu.Unlock()

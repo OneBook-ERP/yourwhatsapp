@@ -41,8 +41,10 @@ func TestConnectFailureMarksDisconnected(t *testing.T) {
 	if st, _, _ := h.m.Status("A"); st != StatusDisconnected {
 		t.Errorf("status = %s", st)
 	}
-	if got := statusPushes(h); len(got) != 2 || got[1] != "Disconnected" {
-		t.Errorf("status pushes = %v", got)
+	// Retried; Frappe hears Disconnected only after the grace period
+	// (TestDisconnectedPushedAfterGrace).
+	if got := statusPushes(h); len(got) != 1 || got[0] != "Active" {
+		t.Errorf("status pushes = %v, want no immediate Disconnected", got)
 	}
 }
 
@@ -53,8 +55,8 @@ func TestClientOutdatedMarksDisconnected(t *testing.T) {
 	if st, _, _ := h.m.Status("A"); st != StatusDisconnected {
 		t.Errorf("status = %s", st)
 	}
-	if got := lastStatusPush(h); got != "Disconnected" {
-		t.Errorf("last status push = %q", got)
+	if got := lastStatusPush(h); got != "Active" {
+		t.Errorf("last status push = %q, want no immediate Disconnected", got)
 	}
 }
 
