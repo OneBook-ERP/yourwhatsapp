@@ -50,8 +50,23 @@ docker compose -f compose.yaml -f overrides/compose.mariadb.yaml -f overrides/co
 - No ports are published. Only containers on the compose network (your Frappe services) reach the relay. Never expose port 8800 to the internet: with the key, anyone can send messages as your numbers.
 - `stop_grace_period: 30s` lets the relay close WhatsApp sessions cleanly. Do not shorten it, and avoid `docker kill` on a live relay: repeated abrupt disconnects can get a device unlinked.
 - Run exactly one relay per data volume.
-- `MEDIA_MAX_BYTES` (default 15 MiB) caps inbound attachments; bigger ones arrive as a text note. Keep it at or below the site's max file size (System Settings), or Frappe stores the message with an "[attachment could not be saved]" note instead.
+- `MEDIA_MAX_BYTES` (default 15 MiB) caps inbound attachments; bigger ones arrive as a text note. The relay logs the effective value at startup (`relay config`, `media_max_bytes`). It must fit through every limit in the chain below.
 - The relay runs as uid 65532 (distroless nonroot). A fresh named volume inherits the right ownership from the image; a bind mount or a pre-existing volume needs a host-side `chown -R 65532:65532 <path>` or the relay cannot open `relay.db` and crashes on start.
+
+### Inbound media size limits
+
+An inbound attachment travels as base64 inside a JSON callback (relay to nginx to Frappe), so every hop must accept about 4/3 of the file plus a little JSON. Raise them together:
+
+| Hop | Setting | Default | Notes |
+|---|---|---|---|
+| Relay | `MEDIA_MAX_BYTES` | 15 MiB (15728640) | Raw file size. After base64 (x 4/3) and JSON the callback is about 20 MiB. Bigger media arrive as a text note. |
+| nginx in the Frappe stack | `CLIENT_MAX_BODY_SIZE` (frappe_docker env var, `client_max_body_size` in its nginx template) | `50m` in the frappe_docker `compose.yaml` and docs I checked | Must be at least the ~20 MiB callback. Verify the name and default in your frappe_docker version. A plain nginx without this setting allows only 1m. |
+| Frappe request limit | site config `max_file_size` (bytes) | 25 MiB (`frappe/app.py`) | Applies to the callback request. Must exceed the ~20 MiB callback. This is the **site config** value; System Settings does not change it for non-upload endpoints. |
+| Frappe stored file | System Settings, **Max File Size (MB)** (`max_file_size`) | 25 MB | Checked when the attachment is saved as a File. If the file is over it, the message is kept with an "[attachment could not be saved]" note and an Error Log row. |
+
+With the defaults the chain is consistent (15 MiB raw, about 20 MiB on the wire, 25 MiB Frappe, 50m nginx). To raise the cap, say to 30 MiB raw (about 40 MiB on the wire): set `MEDIA_MAX_BYTES=31457280` on the relay, `CLIENT_MAX_BODY_SIZE` to at least `60m`, site config `max_file_size` to at least 45 MiB (`bench --site <site> set-config max_file_size 47185920`), and System Settings Max File Size to at least 30 MB. Then restart the relay and the Frappe services. WhatsApp has its own media size limits, so there is little point raising it far.
+
+If media from customers stops arriving, check in this order: the relay log for the callback status (413 means nginx or Frappe refused the body), then Error Log for "WhatsApp inbound media not saved".
 
 ## 4. WhatsApp Settings
 
@@ -125,7 +140,7 @@ Restoring a backup onto a second running relay while the first is alive makes Wh
 
 ## 7. Warm up new numbers
 
-A fresh number that immediately sends bulk traffic is the most reliable way to get it restricted. Start with a few real conversations a day with people who expect to hear from you, raise volume gradually over several weeks, keep the daily cap per account low, spread load across numbers, and prefer replies to cold outreach. The relay adds randomized delays between sends (`SEND_DELAY_MIN` / `SEND_DELAY_MAX`); do not set them to zero.
+A fresh number that immediately sends bulk traffic is the most reliable way to get it restricted. Follow `docs/warm-up.md`: real SIM numbers only, start at `daily_limit` 20 and roughly double every 3-4 days over 1-2 weeks, mix in inbound conversations early, avoid identical bulk text, keep the send delay, and know what a TemporaryBan alert means. Risk reduction only.
 
 ## 8. Risk reduction, not ban-proof
 

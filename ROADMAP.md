@@ -32,7 +32,9 @@ Each phase lists an objective, detailed tasks, and status. Update statuses as wo
 - [x] Inbound media never downloaded at all — `session_manager.js` set `content_type` correctly but never called `msg.downloadMedia()`. Fixed, media now saved as a `File` on the incoming `WhatsApp Message`.
 - [x] Worked around an open upstream `whatsapp-web.js` 1.34.7 bug: WhatsApp's July 2026 Web update renamed the internal serialized-id getter (`_serialized` → `$1`), silently breaking `downloadMedia()`, outgoing `message_id` tracking, and ack status updates. Backfilled in our own code (tracked upstream: [wwebjs/whatsapp-web.js#201833](https://github.com/wwebjs/whatsapp-web.js/issues/201833)).
 
-## Phase 1.6 — Production Readiness 🔄 In progress (blocks go-live, ahead of Phase 2)
+## Phase 1.6 — Production Readiness ✅ Done (2026-11-02)
+
+Shipped: whatsmeow Go relay with claim flow and Docker deploy, UI-only relay setup and key rotation, private files, reliability fixes, quoted replies and real reactions, bell + email health alerts, RBAC audit (`docs/rbac-audit.md`, changes deferred), media-limit chain and warm-up policy (`DEPLOYMENT.md`, `docs/warm-up.md`).
 
 **Objective:** Make the existing send/receive system safe and operable in production. Production runs in Docker with no shell access for us (no `bench`/`docker exec`), so everything after the initial compose deploy must be configurable from the Desk UI by a System Manager. 🚫 = must fix before go-live; the rest should land before real volume.
 
@@ -65,8 +67,8 @@ Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`. Compariso
 - [x] 🚫 QR images now private, and deleted (with the `qr_code` field cleared) as soon as the account connects — a live QR is a credential. Same patch dropped the stale public ones.
 - [x] Delete the 210 orphaned public QR pngs left on disk by the pre-1.5 churn bug (no `File` records; expired, but still publicly served).
 - [x] Constant-time API key comparison on both sides (relay side → §0) (`hmac.compare_digest` / `crypto.timingSafeEqual`).
-- [ ] RBAC audit: who can create/read `WhatsApp Message` (Sales User currently has write), who can see `WhatsApp Account`/`Settings`; `connect()` role check vs doctype perms.
-- [ ] Confirm nginx `client_max_body_size` in the Frappe container allows inbound media callbacks (base64 up to ~22MB).
+- [x] RBAC audit: audited, see `docs/rbac-audit.md`; changes deferred (recommendations listed there).
+- [x] nginx `client_max_body_size` vs inbound media: limit chain documented in `DEPLOYMENT.md` (relay 15 MiB, about 20 MiB on the wire, Frappe 25 MiB, nginx `CLIENT_MAX_BODY_SIZE`); relay logs the effective cap at startup. Verify the nginx value on the real deploy.
 
 ### D. Reliability
 - [x] 🚫 (→ §0) Relay→Frappe callbacks are log-and-drop (`frappe_client.js`) — an inbound message arriving while Frappe restarts during a deploy is lost forever. Persist to a small on-disk queue in the relay volume, retry with backoff.
@@ -81,8 +83,8 @@ Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`. Compariso
 - [x] Acks for messages CRM didn't send (typed on the phone, groups) no longer raise `DoesNotExistError` into Error Log.
 - [x] 🚫 (→ §0) Normalize outgoing numbers to digits only (`+91 98765 43210` → `919876543210`) and validate with `client.getNumberId()` before sending — `+`-prefixed numbers currently fail with 502.
 - [x] 🚫 `crm.api.whatsapp.send_whatsapp_template` sends no parameters → templates go out with literal `{{1}}`. Resolve params from the reference doc (or block templates with unresolved placeholders). Done: `WhatsApp Template Parameter` rows map `{{n}}` to a field or `link.field`, with default values; a missing value blocks the send.
-- [ ] Reactions (`content_type: reaction`) are sent as a plain text emoji — use `msg.react()` on the target message.
-- [ ] Replies: pass `quotedMessageId` on outgoing replies; send `reply_to_message_id` on inbound quoted messages so CRM shows reply context.
+- [x] Reactions (`content_type: reaction`) are real WhatsApp reactions, pinned to the number that holds the target message (the one exception to rotation); refused clearly if that account is not Active.
+- [x] Quoted replies: outgoing replies carry the quote (id, participant, text) and still rotate; inbound reply context reaches CRM.
 - [x] (→ §0) Unresolvable `@lid` senders are stored as a fake phone number (e.g. `157844527657214`) — store the raw lid in a separate field and flag it instead.
 - [x] `default_outgoing_account` (Settings) vs `is_default_outgoing` (Account) duplication; CRM's `is_whatsapp_enabled` requires the Settings one — routing ignores both. Done: per-account checkboxes removed; the Settings defaults are kept on an Active account (CRM's `is_whatsapp_enabled` checks that the default outgoing account is Active), refilled on every transition away from Active and on delete.
 
@@ -90,12 +92,12 @@ Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`. Compariso
 - [x] ~~Per-account realistic user-agent~~ — moot with whatsmeow (no browser); device props set in §0.
 - [x] (→ §0) Randomized inter-send delay per account (queue per account instead of immediate dispatch).
 - [x] (→ §0) `RateLimited` cooldown → auto-return to `Active`.
-- [ ] Warm-up policy documented for new numbers (low `daily_limit`, raise over 1–2 weeks).
+- [x] Warm-up policy documented: `docs/warm-up.md`, linked from `DEPLOYMENT.md`.
 
 ### G. Ops / quality
 - [x] Tests: routing, `api.py` endpoints (auth, unknown ids, inbound media), `relay_client` failover. None exist today.
 - [x] (→ §0) Structured JSON logs from the relay to stdout (Docker log driver picks them up).
-- [ ] Health alert (Notification / System Console) when an account goes `Disconnected`.
+- [x] Health alert: bell + email to System Manager / WhatsApp Admin when an account goes Disconnected, RateLimited or the client is outdated, plus a back-online notice (`alerts.py`, throttled, silent on manual Pause/Logout).
 
 ## Phase 2 — Trigger-Based Automated Messaging 🔲 Not started (next after Phase 1.6)
 
