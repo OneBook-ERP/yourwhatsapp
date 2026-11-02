@@ -3,7 +3,7 @@ from unittest.mock import patch
 
 import frappe
 
-from yourwhatsapp.yourwhatsapp import alerts, api, routing
+from yourwhatsapp.yourwhatsapp import alerts, api, routing, tasks
 from yourwhatsapp.yourwhatsapp.tests.test_default_accounts import RELAY_KEY
 from yourwhatsapp.yourwhatsapp.tests.utils import LiveSafeTestCase
 
@@ -252,6 +252,50 @@ class AlertsTestCase(LiveSafeTestCase):
 			api.account_event(account.session_id, "client_outdated")
 		self.assertEqual(len(self._emailed()), 1)
 		self.assertIn("client outdated", self._emailed()[0])
+
+	def _reconcile(self, account):
+		# The relay is mocked as "connecting": reconcile leaves the status alone.
+		with patch("yourwhatsapp.yourwhatsapp.relay_client.relay_settings", return_value=("http://relay.test", "k")), \
+			patch("yourwhatsapp.yourwhatsapp.relay_client.session_status", return_value="connecting"):
+			tasks.reconcile_account_status(names=[account])
+		self._commit()
+
+	def _flap_to_throttled_down(self):
+		account = self._relay_account().name
+		self._change("Active", "Disconnected", account=account)
+		self._change("Disconnected", "Active", account=account)
+		self._change("Active", "Disconnected", account=account)  # within 15 min: throttled
+		frappe.db.set_value("WhatsApp Account", account, "status", "Disconnected")
+		self.assertEqual(len(self._emailed()), 2)
+		return account
+
+	def test_throttled_down_sent_by_reconcile_after_throttle(self):
+		account = self._flap_to_throttled_down()
+		self._reconcile(account)
+		self.assertEqual(len(self._emailed()), 2)  # throttle still on
+		frappe.cache.delete_value(alerts.alert_key(account, "down"))  # 15 min later
+		self._reconcile(account)
+		self._reconcile(account)
+		self.assertEqual(len(self._emailed()), 3)
+		self.assertIn("is down", self._emailed()[2])
+		self._change("Disconnected", "Active", account=account)
+		self.assertEqual(len(self._emailed()), 4)
+		self.assertIn("back online", self._emailed()[3])
+
+	def test_pending_down_dropped_when_account_recovers(self):
+		account = self._flap_to_throttled_down()
+		self._change("Disconnected", "Active", account=account)
+		frappe.db.set_value("WhatsApp Account", account, "status", "Active")
+		frappe.cache.delete_value(alerts.alert_key(account, "down"))
+		self._reconcile(account)
+		self.assertEqual(len(self._emailed()), 2)
+
+	def test_pending_down_not_sent_while_paused(self):
+		account = self._flap_to_throttled_down()
+		frappe.db.set_value("WhatsApp Account", account, "status", "Paused")
+		frappe.cache.delete_value(alerts.alert_key(account, "down"))
+		self._reconcile(account)
+		self.assertEqual(len(self._emailed()), 2)
 
 	def test_deleted_account_name_reuse_has_no_spurious_recovery(self):
 		account = frappe.get_doc(

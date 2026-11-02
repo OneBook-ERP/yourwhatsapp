@@ -6,7 +6,7 @@ import requests
 from frappe.utils import add_to_date, now_datetime
 
 from yourwhatsapp import hooks
-from yourwhatsapp.yourwhatsapp import relay_client, tasks
+from yourwhatsapp.yourwhatsapp import alerts, relay_client, tasks
 from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings.whatsapp_settings import write_password
 from yourwhatsapp.yourwhatsapp.tests.utils import LiveSafeTestCase
 
@@ -204,6 +204,15 @@ class TestReconcileAccountStatus(LiveSafeTestCase):
 		self._run()
 		self.assertEqual(self.calls, [])
 		self.assertEqual(self._field(account), "Disconnected")
+
+	def test_pending_down_alerts_sent_even_without_relay(self):
+		# A held-back down alert matters most while the relay is unreachable or unset.
+		account = self._account("Reconcile Pending", "connected", status="Disconnected")
+		frappe.db.set_single_value("WhatsApp Settings", "relay_base_url", "")
+		with patch.object(alerts, "send_pending_down_alerts") as send_pending:
+			self._run()
+		send_pending.assert_called_once()
+		self.assertIn(account.name, send_pending.call_args.args[0])
 
 	def test_last_health_check_set_on_checked_accounts(self):
 		account = self._account("Reconcile Health", "connected")

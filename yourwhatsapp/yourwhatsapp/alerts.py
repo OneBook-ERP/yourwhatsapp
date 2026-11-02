@@ -14,7 +14,7 @@ MANUAL_SECONDS = 5 * 60
 LOG_ONCE_SECONDS = 24 * 60 * 60
 DOWN_SENT_SECONDS = 30 * 24 * 60 * 60
 KEY_PREFIX = "yourwhatsapp:alert:"
-KEY_KINDS = ("down", "down_sent", "manual")
+KEY_KINDS = ("down", "down_sent", "manual", "pending_down")
 SITE_KEY_ACCOUNT = "_all"  # alert_key() owner for site-wide notes
 NO_EMAIL_LOGGED_KIND = "no_email_logged"
 NO_RECIPIENTS_LOGGED_KIND = "no_recipients_logged"
@@ -53,6 +53,21 @@ def report_down(account: str, status: str, reason: str) -> None:
 	if frappe.cache.get_value(alert_key(account, "down_sent")):
 		return
 	_safely(account, _send_down, account, status, reason)
+
+
+def send_pending_down_alerts(names=None) -> None:
+	"""Send down alerts the throttle held back, once it has expired, for
+	accounts still down (reconcile_account_status runs this every 5 minutes).
+	An account that recovered, or that an admin Paused, drops its pending alert."""
+	filters = {"name": ["in", names]} if names is not None else {}
+	for account, status in frappe.get_all("WhatsApp Account", filters=filters, fields=["name", "status"], as_list=True):
+		pending = frappe.cache.get_value(alert_key(account, "pending_down"))
+		if not pending or frappe.cache.get_value(alert_key(account, "down")):
+			continue
+		if status in ("Active", "Paused"):
+			_delete_after_commit(alert_key(account, "pending_down"))
+			continue
+		_safely(account, _send_down, account, status, pending.get("reason"))
 
 
 def alert_recipients() -> list[str]:
@@ -95,15 +110,19 @@ def _send_down(account: str, new: str, reason: str | None):
 	if frappe.cache.get_value(alert_key(account, "manual")):
 		return
 	if frappe.cache.get_value(alert_key(account, "down")):
+		# Throttled, not forgotten: send_pending_down_alerts sends it later if still down.
+		_set_after_commit(alert_key(account, "pending_down"), DOWN_SENT_SECONDS, {"reason": reason})
 		return
 	_set_after_commit(alert_key(account, "down"), DOWN_THROTTLE_SECONDS)
 	_set_after_commit(alert_key(account, "down_sent"), DOWN_SENT_SECONDS)
+	_delete_after_commit(alert_key(account, "pending_down"))
 	detail = f"{new} ({reason})" if reason else new
 	subject = _("WhatsApp number {0} is down: {1}").format(account, detail)
 	_notify(account, subject, _("Messages cannot be sent from this number until it is Active again."))
 
 
 def _send_recovery(account: str, old: str | None):
+	_delete_after_commit(alert_key(account, "pending_down"))
 	if not frappe.cache.get_value(alert_key(account, "down_sent")):
 		return
 	_delete_after_commit(alert_key(account, "down_sent"))
@@ -179,8 +198,8 @@ def _safely(account: str, send, *args):
 
 # Alert state follows the transaction that sent the alert: if it rolls back
 # (bell and email go with it), nothing is recorded and a retried callback alerts.
-def _set_after_commit(key: str, expires_in_sec: int):
-	frappe.db.after_commit.add(lambda: frappe.cache.set_value(key, 1, expires_in_sec=expires_in_sec))
+def _set_after_commit(key: str, expires_in_sec: int, value=1):
+	frappe.db.after_commit.add(lambda: frappe.cache.set_value(key, value, expires_in_sec=expires_in_sec))
 
 
 def _delete_after_commit(key: str):

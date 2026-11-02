@@ -4,6 +4,7 @@ import frappe
 import requests
 from frappe.utils import now_datetime
 
+from yourwhatsapp.yourwhatsapp import alerts
 from yourwhatsapp.yourwhatsapp.routing import mark_disconnected, set_account_active
 
 RECONCILE_MINUTES = 5  # hooks.py runs reconcile_account_status on this cron
@@ -58,6 +59,8 @@ def reconcile_account_status(names=None):
 	failure is logged and skips only that account. names limits the run (tests)."""
 	from yourwhatsapp.yourwhatsapp.relay_client import RelayNotConfigured, relay_settings, session_status
 
+	# First: a held-back alert matters most while the relay is down or unreachable.
+	alerts.send_pending_down_alerts(names)
 	try:
 		relay_settings()
 	except RelayNotConfigured:
