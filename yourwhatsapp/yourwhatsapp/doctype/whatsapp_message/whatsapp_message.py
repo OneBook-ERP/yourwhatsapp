@@ -13,16 +13,13 @@ MEDIA_CONTENT_TYPES = ("image", "video", "audio", "document")
 class WhatsAppMessage(Document):
 	def before_insert(self):
 		if self.type == "Outgoing":
-			self._validate_media_attached()
 			# Digits only (as inbound `from` below): threads are keyed by the
 			# customer's number, whichever of our accounts carried the message.
 			self.to = normalize_number(self.to) or self.to
-			self.message_type = "Template" if self.use_template else "Manual"
-			# Before resolution: a template reads from the matched Lead/Deal.
-			self._link_crm_reference()
-			self._fill_template_parameters()
-			if not self.whatsapp_account:
-				self.whatsapp_account = pick_account(recipient=self.to)
+			if self.content_type == "reaction":
+				self._pin_reaction_account()
+			else:
+				self._prepare_outgoing()
 			self.status = "Queued"
 		else:
 			self.set("from", normalize_number(self.get("from")) or self.get("from"))
@@ -30,6 +27,28 @@ class WhatsAppMessage(Document):
 
 	def validate(self):
 		self._link_crm_reference()
+
+	def _prepare_outgoing(self):
+		self._validate_media_attached()
+		self.message_type = "Template" if self.use_template else "Manual"
+		# Before resolution: a template reads from the matched Lead/Deal.
+		self._link_crm_reference()
+		self._fill_template_parameters()
+		if not self.whatsapp_account:
+			self.whatsapp_account = pick_account(recipient=self.to)
+
+	def _pin_reaction_account(self):
+		"""The one exception to rotation: WhatsApp only applies a reaction sent
+		from the number whose chat holds the target, so it never fails over."""
+		self.message_type = "Manual"
+		target = reply_target(self.reply_to_message_id)
+		account = target and target.whatsapp_account
+		if not account or frappe.db.get_value("WhatsApp Account", account, "status") != "Active":
+			frappe.throw(
+				_("Reaction needs {0} to be connected").format(account or _("the original WhatsApp Account")),
+				frappe.ValidationError,
+			)
+		self.whatsapp_account = account
 
 	def _fill_template_parameters(self):
 		if not (self.use_template and self.template) or self.template_parameters:
@@ -79,3 +98,16 @@ class WhatsAppMessage(Document):
 				message_name=self.name,
 				enqueue_after_commit=True,
 			)
+
+
+def reply_target(message_id: str | None):
+	"""The WhatsApp Message a reply quotes or a reaction targets, by WhatsApp's message id."""
+	if not message_id:
+		return None
+	return frappe.db.get_value(
+		"WhatsApp Message",
+		{"message_id": message_id},
+		["type", "message", "content_type", "attach", "whatsapp_account"],
+		as_dict=True,
+		order_by="creation desc",
+	)

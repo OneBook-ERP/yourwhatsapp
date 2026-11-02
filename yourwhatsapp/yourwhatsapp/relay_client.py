@@ -6,9 +6,11 @@ import frappe
 import requests
 from frappe.utils import add_to_date, cint, now_datetime
 
+from yourwhatsapp.yourwhatsapp.doctype.whatsapp_message.whatsapp_message import MEDIA_CONTENT_TYPES, reply_target
 from yourwhatsapp.yourwhatsapp.routing import (
 	mark_disconnected,
 	mark_rate_limited,
+	normalize_number,
 	pick_account,
 	to_system_datetime,
 )
@@ -75,6 +77,35 @@ def _attach_payload(doc):
 		"attach_mimetype": mimetype,
 		"attach_filename": file_doc.file_name,
 	}
+
+
+def _reply_payload(doc):
+	"""What the relay needs to quote (or react to) the target. A target Frappe
+	doesn't have sends a reply as a plain message; a reaction can't get here
+	without one (WhatsAppMessage refuses it at insert)."""
+	target = reply_target(doc.reply_to_message_id)
+	if not target:
+		return {}
+	from_me = target.type == "Outgoing"
+	payload = {
+		"reply_to_message_id": doc.reply_to_message_id,
+		"reply_from_me": from_me,
+		"reply_text": _quoted_text(target),
+	}
+	if from_me:
+		# Rotation may reply from another number than the one that sent the quote.
+		phone = frappe.db.get_value("WhatsApp Account", target.whatsapp_account, "phone_number")
+		if normalize_number(phone):
+			payload["reply_participant"] = normalize_number(phone)
+	return payload
+
+
+def _quoted_text(target) -> str:
+	# CRM stores an uncaptioned attachment's URL as the message text.
+	caption = "" if target.message == target.attach else (target.message or "")
+	if caption or target.content_type not in MEDIA_CONTENT_TYPES:
+		return caption
+	return f"[{target.content_type}]"
 
 
 class RelayNotConfigured(Exception):
@@ -151,7 +182,11 @@ def _remember_attempt(doc, account: str):
 def _switch_account(doc, reason: str, relay_unavailable: bool = False, append: bool = False) -> bool:
 	"""Move the message to an account not yet tried. When none is left it is
 	parked for a later retry if the relay itself was unavailable, else Failed
-	with `reason` (appended to the relay's own reason when `append`)."""
+	with `reason` (appended to the relay's own reason when `append`). A
+	reaction is never moved: only its target's number can send it."""
+	if doc.content_type == "reaction":
+		_fail(doc, f"{doc.error_reason}; {reason}" if append and doc.error_reason else reason)
+		return False
 	next_account = pick_account(exclude=_attempted_accounts(doc), recipient=doc.to)
 	if next_account:
 		doc.db_set("whatsapp_account", next_account)
@@ -205,6 +240,7 @@ def _post(doc, account, base_url: str, api_key: str, message: str):
 		"message": message,
 		"local_message_id": doc.name,
 		**_attach_payload(doc),
+		**_reply_payload(doc),
 	}
 	for attempt in (1, 2):
 		try:

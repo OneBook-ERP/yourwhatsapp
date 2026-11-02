@@ -163,8 +163,11 @@ def message_status(
 		values["message_id"] = message_id
 	frappe.db.set_value("WhatsApp Message", name, values)
 	if status == "Sent" and current != "Sent":
-		account = frappe.db.get_value("WhatsApp Message", name, "whatsapp_account")
-		if account:
+		# Reactions don't count toward the account's daily limit.
+		account, content_type = frappe.db.get_value(
+			"WhatsApp Message", name, ["whatsapp_account", "content_type"]
+		)
+		if account and content_type != "reaction":
 			increment_daily_count(account)
 	return {"ok": True}
 
@@ -196,10 +199,14 @@ def _apply_failure(name: str, error_reason: str | None, error_code: str | None, 
 	frappe.db.set_value("WhatsApp Message", name, values)
 
 	if error_code in FAILOVER_ERROR_CODES:
-		if error_code == "temp_banned":
-			account = frappe.db.get_value("WhatsApp Message", name, "whatsapp_account")
-			if account:
-				mark_rate_limited(account)
+		account, content_type = frappe.db.get_value(
+			"WhatsApp Message", name, ["whatsapp_account", "content_type"]
+		)
+		if error_code == "temp_banned" and account:
+			mark_rate_limited(account)
+		if content_type == "reaction":
+			# Only the target's number can send it: no failover, no retry.
+			return {"ok": True}
 		frappe.enqueue(FAILOVER_METHOD, message_name=name, error_code=error_code, enqueue_after_commit=True)
 	return {"ok": True}
 
