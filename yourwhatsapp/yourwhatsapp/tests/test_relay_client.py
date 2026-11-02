@@ -25,8 +25,8 @@ class TestRelayClient(IntegrationTestCase):
 	def setUp(self):
 		settings = frappe.get_single("WhatsApp Settings")
 		settings.relay_base_url = "http://relay.test"
-		settings.relay_api_key = RELAY_KEY
 		settings.save(ignore_permissions=True)
+		write_password("relay_api_key", RELAY_KEY)
 
 		for patcher in (
 			patch("frappe.enqueue"),

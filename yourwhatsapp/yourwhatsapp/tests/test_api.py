@@ -6,6 +6,7 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, now_datetime
 
 from yourwhatsapp.yourwhatsapp import api
+from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings.whatsapp_settings import write_password
 
 RELAY_KEY = "test-relay-key"
 FAILOVER_TARGET = "yourwhatsapp.yourwhatsapp.relay_client.handle_async_failure"
@@ -13,9 +14,7 @@ FAILOVER_TARGET = "yourwhatsapp.yourwhatsapp.relay_client.handle_async_failure"
 
 class TestRelayCallbacks(IntegrationTestCase):
 	def setUp(self):
-		settings = frappe.get_single("WhatsApp Settings")
-		settings.relay_api_key = RELAY_KEY
-		settings.save(ignore_permissions=True)
+		write_password("relay_api_key", RELAY_KEY)
 
 		key_patch = patch("frappe.get_request_header", return_value=RELAY_KEY)
 		key_patch.start()

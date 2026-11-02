@@ -4,6 +4,8 @@ import frappe
 import requests
 from frappe.tests import IntegrationTestCase
 
+from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings.whatsapp_settings import write_password
+
 RELAY_KEY = "test-relay-key"
 
 
@@ -19,8 +21,8 @@ class TestWhatsAppAccount(IntegrationTestCase):
 	def setUp(self):
 		settings = frappe.get_single("WhatsApp Settings")
 		settings.relay_base_url = "http://relay.test"
-		settings.relay_api_key = RELAY_KEY
 		settings.save(ignore_permissions=True)
+		write_password("relay_api_key", RELAY_KEY)
 		self.account = frappe.get_doc(
 			{
 				"doctype": "WhatsApp Account",

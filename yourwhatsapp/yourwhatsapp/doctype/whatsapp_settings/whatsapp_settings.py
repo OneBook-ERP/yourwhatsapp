@@ -36,6 +36,17 @@ CALLBACK_UNREACHABLE = (
 	"the relay can reach (in Docker the internal URL, e.g. http://frontend:8080), save, and try again."
 )
 ACCEPTED, REJECTED, UNKNOWN = "accepted", "rejected", "unknown"
+# Who can reach the relay, and with which key: only a System Manager changes these.
+RELAY_CONNECTION_FIELDS = ("relay_base_url", "relay_api_key", "relay_pending_key", "relay_bootstrap_token")
+RELAY_FIELDS_FORBIDDEN = "Only a System Manager can change the relay connection settings ({0})."
+TYPED_KEY_NOT_ENV = (
+	"Relay API Key can only be typed in for a relay that takes its key from RELAY_API_KEY "
+	"(env mode); this relay is in {0} mode. Use the Relay buttons instead."
+)
+TYPED_KEY_UNREACHABLE = (
+	"Relay API Key can only be typed in for an env-mode relay, and the relay could not be reached "
+	"to check its mode: {0} The key was not saved."
+)
 # Answers that prove the relay refused this request, once /info confirms it
 # doesn't take the pending key either.
 REFUSALS = {
@@ -47,6 +58,34 @@ REFUSALS = {
 
 
 class WhatsAppSettings(Document):
+	def validate(self):
+		# Controller methods store keys with write_password, which skips this.
+		changed = self._changed_relay_fields()
+		if not changed:
+			return
+		if "System Manager" not in frappe.get_roles():
+			labels = ", ".join(_(self.meta.get_label(fieldname)) for fieldname in changed)
+			frappe.throw(_(RELAY_FIELDS_FORBIDDEN).format(labels), frappe.PermissionError)
+		if "relay_api_key" in changed:
+			self._require_env_mode_relay()
+
+	def _changed_relay_fields(self):
+		before = self.get_doc_before_save()
+		return [
+			fieldname
+			for fieldname in RELAY_CONNECTION_FIELDS
+			if (self.get(fieldname) or "") != ((before.get(fieldname) if before else None) or "")
+		]
+
+	def _require_env_mode_relay(self):
+		"""A hand-typed key is only right for an env-mode relay; elsewhere it would lock this site out."""
+		try:
+			mode = self._relay_info().get("mode")
+		except requests.exceptions.RequestException as exc:
+			frappe.throw(_(TYPED_KEY_UNREACHABLE).format(_unreachable(exc)))
+		if mode != "env":
+			frappe.throw(_(TYPED_KEY_NOT_ENV).format(mode or _("an unknown")))
+
 	@frappe.whitelist(methods=["POST"])
 	def connect_relay(self):
 		frappe.only_for("System Manager")

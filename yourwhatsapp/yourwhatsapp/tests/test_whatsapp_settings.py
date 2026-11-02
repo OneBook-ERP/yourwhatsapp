@@ -147,10 +147,10 @@ class TestWhatsAppSettingsRelay(IntegrationTestCase):
 		settings = frappe.get_single("WhatsApp Settings")
 		settings.relay_base_url = BASE_URL
 		settings.relay_reachable_frappe_url = ""
-		settings.relay_bootstrap_token = ""
-		settings.relay_pending_key = ""
-		settings.relay_api_key = ""
 		settings.save(ignore_permissions=True)
+		# Keys go in the way the controller writes them: a typed key needs an env-mode relay.
+		for fieldname in ("relay_api_key", "relay_pending_key", "relay_bootstrap_token"):
+			ws.write_password(fieldname, None)
 		# The controller commits the pending key before calling the relay; in
 		# tests that commit must not reach the live site.
 		commit = patch.object(frappe.db, "commit")
@@ -623,6 +623,79 @@ class TestWhatsAppSettingsRelay(IntegrationTestCase):
 			{"doctype": "User", "email": ROLE_USER, "first_name": "Relay", "send_welcome_email": 0}
 		).insert(ignore_permissions=True)
 		user.add_roles("WhatsApp Admin")
+
+	# Server-side guard on the relay connection fields
+
+	def test_whatsapp_admin_cannot_change_relay_fields(self):
+		self._make_whatsapp_admin()
+		self._set_keys(current=OLD_KEY)
+		relay = self._use(FakeRelay(mode="env", current=OLD_KEY))
+		frappe.set_user(ROLE_USER)
+		changes = {
+			"relay_base_url": "http://elsewhere.test",
+			"relay_api_key": "typed-key-" + "t" * 32,
+			"relay_pending_key": "typed-pending-" + "t" * 32,
+			"relay_bootstrap_token": "typed-token",
+		}
+		for fieldname, value in changes.items():
+			with self.subTest(field=fieldname):
+				settings = self._settings()
+				settings.set(fieldname, value)
+				self.assertRaises(frappe.PermissionError, settings.save)
+		frappe.set_user("Administrator")
+		self.assertEqual(self._keys(), (OLD_KEY, None))
+		self.assertEqual(self._settings().relay_base_url, BASE_URL)
+		self.assertEqual(relay.calls, [])
+
+	def test_whatsapp_admin_can_save_other_fields(self):
+		self._make_whatsapp_admin()
+		self._set_keys(current=OLD_KEY)
+		frappe.set_user(ROLE_USER)
+		settings = self._settings()
+		settings.routing_strategy = "Priority"
+		settings.save()
+		frappe.set_user("Administrator")
+		self.assertEqual(self._settings().routing_strategy, "Priority")
+		self.assertEqual(self._keys(), (OLD_KEY, None))
+
+	def test_typed_key_saved_only_for_env_mode_relay(self):
+		typed = "typed-key-" + "t" * 32
+		cases = {
+			"env": (FakeRelay(mode="env", current=typed), True),
+			"claimed": (FakeRelay(mode="claimed", current=OLD_KEY), False),
+			"unclaimed": (FakeRelay(), False),
+			"unreachable": (FakeRelay(fail={("GET", "/info"): requests.exceptions.ConnectionError("refused")}), False),
+		}
+		for mode, (relay, allowed) in cases.items():
+			with self.subTest(mode=mode), patch.object(ws.requests, "request", side_effect=relay):
+				self._set_keys(current=OLD_KEY)
+				settings = self._settings()
+				settings.relay_api_key = typed
+				if allowed:
+					settings.save()
+					self.assertEqual(self._keys(), (typed, None))
+				else:
+					with self.assertRaises(frappe.ValidationError) as caught:
+						settings.save()
+					self.assertNotIsInstance(caught.exception, frappe.PermissionError)
+					self.assertNotIn(typed, str(caught.exception))
+					self.assertEqual(self._keys(), (OLD_KEY, None))
+				self.assertEqual(relay.calls[0]["route"], ("GET", "/info"))
+
+	def test_system_manager_changes_base_url_without_probe(self):
+		relay = self._use(FakeRelay())
+		settings = self._settings()
+		settings.relay_base_url = "http://elsewhere.test"
+		settings.save()
+		self.assertEqual(self._settings().relay_base_url, "http://elsewhere.test")
+		self.assertEqual(relay.calls, [])
+
+	def test_key_writes_by_controller_bypass_guard(self):
+		self._make_whatsapp_admin()
+		frappe.set_user(ROLE_USER)
+		ws.write_password("relay_api_key", OLD_KEY)
+		frappe.set_user("Administrator")
+		self.assertEqual(self._keys(), (OLD_KEY, None))
 
 	def test_key_never_in_error_message(self):
 		pending = "q" * 43

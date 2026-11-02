@@ -89,6 +89,7 @@ New table `relay_config` (single row): `api_key` (plaintext, see Key storage), `
   - **Update Callback URL:** PUT `/claim/callback`.
   - **Test Connection:** GET `/info` with the key and render the panel. Shows "unreachable" on connection error, "key rejected" on 401, "unclaimed" if the relay isn't claimed.
 - The existing manual path (typing a key that matches `RELAY_API_KEY`) keeps working for env-claimed relays.
+- **Server-side guard (final-review fix I4):** `WhatsApp Settings.validate` refuses (PermissionError) any change to `relay_base_url`, `relay_api_key`, `relay_pending_key` or `relay_bootstrap_token` by a user without System Manager; the UI's read-only flag is not the only barrier. A typed `relay_api_key` is further only saved when the relay's `GET /info` (at the saved Base URL) reports `mode == "env"`; any other mode, or an unreachable relay, refuses the save with a message saying why. The controller's own key writes go through `write_password` (direct Singles/`__Auth` writes), which skip `validate`.
 
 ## 7. Template parameters
 - **New child doctype `WhatsApp Template Parameter`** (table field `parameters` on WhatsApp Templates), with fields:

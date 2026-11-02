@@ -7,6 +7,7 @@ from frappe.utils import now_datetime
 
 from yourwhatsapp.patches.v1_0 import fill_default_whatsapp_accounts
 from yourwhatsapp.yourwhatsapp import api, routing, tasks
+from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings.whatsapp_settings import write_password
 
 DEFAULT_FIELDS = ("default_outgoing_account", "default_incoming_account")
 RELAY_KEY = "test-relay-key"
@@ -26,8 +27,8 @@ class DefaultsTestCase(IntegrationTestCase):
 	def setUp(self):
 		settings = frappe.get_single("WhatsApp Settings")
 		settings.relay_base_url = "http://relay.test"
-		settings.relay_api_key = RELAY_KEY
 		settings.save(ignore_permissions=True)
+		write_password("relay_api_key", RELAY_KEY)
 		key_patch = patch("frappe.get_request_header", return_value=RELAY_KEY)
 		key_patch.start()
 		self.addCleanup(key_patch.stop)
