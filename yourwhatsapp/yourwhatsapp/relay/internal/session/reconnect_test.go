@@ -2,10 +2,13 @@ package session
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
 
+	"go.mau.fi/whatsmeow"
+	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types/events"
 
 	"yourwhatsapp/relay/internal/outbox"
@@ -155,12 +158,11 @@ func TestReconnectDelayJitter(t *testing.T) {
 	}
 }
 
-// Connect failure after a working connection (ConnectFailure, ClientOutdated)
-// also retries, on the same client.
+// A ConnectFailure after a working connection also retries, on the same
+// client. (ClientOutdated does not: TestClientOutdatedReportsImmediatelyWithoutRetry.)
 func TestConnectFailureEventRetries(t *testing.T) {
 	for name, evt := range map[string]any{
 		"connect failure": &events.ConnectFailure{Reason: events.ConnectFailureReason(499)},
-		"client outdated": &events.ClientOutdated{},
 	} {
 		t.Run(name, func(t *testing.T) {
 			h := newHarness(t)
@@ -315,6 +317,9 @@ func TestSocketDropReportedOnlyAfterGrace(t *testing.T) {
 	fc.Disconnect()
 	fc.emit(&events.Disconnected{})
 	ft.fireOne(t, "grace", isGrace)
+	if p := ft.pending(isRetry); len(p) != 0 {
+		t.Errorf("relay retry started although whatsmeow owns the socket")
+	}
 	if st, _, _ := h.m.Status("A"); st != StatusDisconnected {
 		t.Errorf("status = %s", st)
 	}
@@ -328,5 +333,70 @@ func TestSocketDropReportedOnlyAfterGrace(t *testing.T) {
 	}
 	if n := len(h.callbacks(outbox.MethodQR)); n != 3 {
 		t.Errorf("update_qr callbacks = %d, want 3", n)
+	}
+}
+
+// whatsmeow's own auto-reconnect may already hold the socket.
+func TestDialAlreadyConnectedIsSuccess(t *testing.T) {
+	h := newHarness(t)
+	ft := installFakeTimers(h)
+	h.setup = func(fc *fakeClient) {
+		fc.connectErr = func(int) error { return fmt.Errorf("connect: %w", whatsmeow.ErrAlreadyConnected) }
+	}
+	h.pairedAccount("A", testJID)
+	if err := h.m.RestoreAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, _ := h.m.Status("A"); st != StatusConnecting {
+		t.Errorf("status = %s, want connecting", st)
+	}
+	if p := ft.pending(isRetry); len(p) != 0 {
+		t.Errorf("retry scheduled for an already-connected client")
+	}
+}
+
+// whatsmeow deleted the device (logged out on connect): terminal, like LoggedOut.
+func TestDialDeviceDeletedIsTerminal(t *testing.T) {
+	h := newHarness(t)
+	ft := installFakeTimers(h)
+	h.setup = func(fc *fakeClient) { fc.connectErr = func(int) error { return wastore.ErrDeviceDeleted } }
+	h.pairedAccount("A", testJID)
+	if err := h.m.RestoreAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st, _, _ := h.m.Status("A"); st != StatusLoggedOut {
+		t.Errorf("status = %s, want logged_out", st)
+	}
+	if acct, _, _ := h.st.GetAccount(context.Background(), "A"); acct.JID != "" {
+		t.Errorf("jid = %q, want cleared", acct.JID)
+	}
+	if got := statusPushes(h); len(got) != 1 || got[0] != "Disconnected" {
+		t.Errorf("pushes = %v, want one immediate Disconnected", got)
+	}
+	if p := ft.pending(func(time.Duration) bool { return true }); len(p) != 0 {
+		t.Errorf("timers pending: %d", len(p))
+	}
+}
+
+// Connect() returned but login never completed and no whatsmeow loop owns
+// the socket: after the grace period the relay reports and retries itself.
+func TestStuckConnectingRetriesAfterGrace(t *testing.T) {
+	h := newHarness(t)
+	ft := installFakeTimers(h)
+	h.pairedAccount("A", testJID)
+	if err := h.m.RestoreAll(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	ft.fireOne(t, "grace", isGrace)
+	if got := statusPushes(h); len(got) != 1 || got[0] != "Disconnected" {
+		t.Errorf("pushes = %v", got)
+	}
+	if st, _, _ := h.m.Status("A"); st != StatusDisconnected {
+		t.Errorf("status = %s", st)
+	}
+	ft.fireOne(t, "retry", isRetry)
+	fc := h.client(0)
+	if fc.connects != 2 || fc.disconnects == 0 {
+		t.Errorf("connects = %d, disconnects = %d; want the stuck socket dropped and redialled", fc.connects, fc.disconnects)
 	}
 }

@@ -41,6 +41,9 @@ const (
 	frappeDisconnected = "Disconnected"
 )
 
+// account_event events besides StatusTempBanned.
+const eventClientOutdated = "client_outdated"
+
 const (
 	numberCacheTTL   = 24 * time.Hour
 	downloadTimeout  = 2 * time.Minute
@@ -68,7 +71,7 @@ type qrPayload struct {
 type accountEventPayload struct {
 	SessionID string `json:"session_id"`
 	Event     string `json:"event"`
-	Until     string `json:"until"`
+	Until     string `json:"until,omitempty"`
 }
 
 type numberEntry struct {
@@ -109,6 +112,8 @@ type Session struct {
 	downStop     func() bool
 	downGen      int
 	downReported bool
+	// autoReconnecting: whatsmeow's own loop owns the socket (after a drop).
+	autoReconnecting bool
 }
 
 func (s *Session) Status() string {
@@ -283,7 +288,7 @@ func (s *Session) handleEvent(evt any) {
 	case *events.ConnectFailure:
 		s.onConnectionLost("connect failure", "reason", int(e.Reason))
 	case *events.ClientOutdated:
-		s.onConnectionLost("client outdated: whatsmeow needs upgrading")
+		s.onClientOutdated()
 	case *events.Disconnected:
 		s.onSocketDropped()
 	case *events.Message:
@@ -325,6 +330,11 @@ func (s *Session) onPairSuccess(e *events.PairSuccess) {
 
 // onLoggedOut: whatsmeow already deletes the device store before emitting it.
 func (s *Session) onLoggedOut(e *events.LoggedOut) {
+	s.becomeLoggedOut("logged out by WhatsApp", "reason", e.Reason.String(), "on_connect", e.OnConnect)
+}
+
+// becomeLoggedOut ends a session whose device WhatsApp no longer accepts.
+func (s *Session) becomeLoggedOut(msg string, attrs ...any) {
 	ctx, cancel := context.WithTimeout(context.Background(), callbackTimeout)
 	defer cancel()
 	if err := s.m.st.SetAccountJID(ctx, s.id, ""); err != nil {
@@ -335,7 +345,7 @@ func (s *Session) onLoggedOut(e *events.LoggedOut) {
 	s.status = StatusLoggedOut
 	s.jid = types.EmptyJID
 	s.mu.Unlock()
-	s.log.Warn("logged out by WhatsApp", "reason", e.Reason.String(), "on_connect", e.OnConnect)
+	s.log.Warn(msg, attrs...)
 	s.pushStatus(frappeDisconnected)
 }
 
@@ -352,17 +362,36 @@ func (s *Session) onStreamReplaced() {
 // retries, and tells Frappe only if the session stays down (reconnect.go).
 func (s *Session) onConnectionLost(msg string, attrs ...any) {
 	s.log.Error(msg, attrs...)
-	s.setStatus(StatusDisconnected)
+	s.mu.Lock()
+	s.status = StatusDisconnected
+	s.autoReconnecting = false
+	s.mu.Unlock()
 	s.armDownTimer()
 	s.scheduleReconnect()
+}
+
+// onClientOutdated: no retry can succeed until whatsmeow is upgraded, so stop
+// and tell Frappe at once.
+func (s *Session) onClientOutdated() {
+	s.log.Error("WhatsApp rejected the client as outdated — upgrade whatsmeow")
+	s.stopReconnect()
+	s.client.Disconnect()
+	s.setStatus(StatusDisconnected)
+	s.pushStatus(frappeDisconnected)
+	s.callback(outbox.MethodAccountEvent, accountEventPayload{SessionID: s.id, Event: eventClientOutdated})
 }
 
 // onSocketDropped: whatsmeow auto-reconnects a dropped socket itself; Frappe
 // is told only if that takes longer than the grace period.
 func (s *Session) onSocketDropped() {
 	s.log.Info("socket disconnected; auto-reconnect will retry")
-	switch s.Status() {
-	case StatusConnected, StatusConnecting:
+	s.mu.Lock()
+	dropped := s.status == StatusConnected || s.status == StatusConnecting
+	if dropped {
+		s.autoReconnecting = true
+	}
+	s.mu.Unlock()
+	if dropped {
 		s.armDownTimer()
 	}
 }

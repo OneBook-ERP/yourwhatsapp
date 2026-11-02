@@ -34,7 +34,7 @@ func TestReceiptDuringSendOrderedAfterSent(t *testing.T) {
 	}
 }
 
-func TestConnectFailureMarksDisconnected(t *testing.T) {
+func TestConnectFailureDefersDisconnectedPush(t *testing.T) {
 	h := newHarness(t)
 	fc := h.connected("A", testJID)
 	fc.emit(&events.ConnectFailure{Reason: events.ConnectFailureReason(499), Message: "unknown"})
@@ -48,28 +48,61 @@ func TestConnectFailureMarksDisconnected(t *testing.T) {
 	}
 }
 
-func TestClientOutdatedMarksDisconnected(t *testing.T) {
+// Retrying can't help an outdated client: stop, and tell Frappe at once.
+func TestClientOutdatedReportsImmediatelyWithoutRetry(t *testing.T) {
 	h := newHarness(t)
+	ft := installFakeTimers(h)
 	fc := h.connected("A", testJID)
 	fc.emit(&events.ClientOutdated{})
 	if st, _, _ := h.m.Status("A"); st != StatusDisconnected {
 		t.Errorf("status = %s", st)
 	}
-	if got := lastStatusPush(h); got != "Active" {
-		t.Errorf("last status push = %q, want no immediate Disconnected", got)
+	if got := statusPushes(h); len(got) != 2 || got[1] != "Disconnected" {
+		t.Errorf("status pushes = %v, want an immediate Disconnected", got)
+	}
+	evs := h.callbacks(outbox.MethodAccountEvent)
+	if len(evs) != 1 || evs[0]["session_id"] != "A" || evs[0]["event"] != "client_outdated" {
+		t.Errorf("account events = %v", evs)
+	}
+	if _, has := evs[0]["until"]; has {
+		t.Errorf("client_outdated carries until: %v", evs[0])
+	}
+	if p := ft.pending(func(time.Duration) bool { return true }); len(p) != 0 {
+		t.Errorf("timers pending: %d, want no retry or grace", len(p))
 	}
 }
 
-func TestStartRebuildsAfterConnectFailure(t *testing.T) {
+// Start on a disconnected paired session dials the same client: a rebuild
+// could leave two sockets while whatsmeow's own auto-reconnect is live.
+func TestStartReusesClientAfterConnectFailure(t *testing.T) {
 	h := newHarness(t)
 	fc := h.connected("A", testJID)
 	fc.emit(&events.ConnectFailure{Reason: events.ConnectFailureReason(499)})
-	status, err := h.m.Start(context.Background(), "A", nil)
+	fc.Disconnect()
+	same := "" // unchanged (empty) proxy sent explicitly
+	for _, proxy := range []*string{nil, &same} {
+		status, err := h.m.Start(context.Background(), "A", proxy)
+		if err != nil || status != StatusConnecting {
+			t.Fatalf("Start = %s, %v", status, err)
+		}
+		h.m.session("A").setStatus(StatusDisconnected)
+	}
+	if h.clientCount() != 1 || fc.connects != 3 {
+		t.Fatalf("clients = %d, connects = %d; want the same client dialled", h.clientCount(), fc.connects)
+	}
+}
+
+func TestStartRebuildsOnProxyChange(t *testing.T) {
+	h := newHarness(t)
+	fc := h.connected("A", testJID)
+	fc.emit(&events.ConnectFailure{Reason: events.ConnectFailureReason(499)})
+	proxy := "socks5://10.0.0.1:1080"
+	status, err := h.m.Start(context.Background(), "A", &proxy)
 	if err != nil || status != StatusConnecting {
 		t.Fatalf("Start = %s, %v", status, err)
 	}
-	if h.clientCount() != 2 || h.client(1).connects != 1 {
-		t.Fatalf("clients = %d, want a rebuilt one", h.clientCount())
+	if h.clientCount() != 2 || h.client(1).connects != 1 || h.client(1).proxy != proxy {
+		t.Fatalf("clients = %d, want a rebuilt one with the new proxy", h.clientCount())
 	}
 	if fc.IsConnected() {
 		t.Error("old client left connected")

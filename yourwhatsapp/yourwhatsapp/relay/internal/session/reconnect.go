@@ -1,14 +1,19 @@
 package session
 
 import (
+	"errors"
 	"math/rand/v2"
 	"time"
+
+	"go.mau.fi/whatsmeow"
+	wastore "go.mau.fi/whatsmeow/store"
 )
 
 // whatsmeow only auto-reconnects a connection that once existed, so the relay
 // retries a paired session whose own connect attempt failed (boot restore,
-// Start/Resume, ConnectFailure, ClientOutdated, ban expiry) until it connects,
-// is paused, logged out, retired or the relay shuts down.
+// Start/Resume, ConnectFailure, ban expiry, a login stuck past the grace
+// period) until it connects, is paused, logged out, retired or the relay shuts
+// down. ClientOutdated and StreamReplaced are never retried.
 var reconnectBackoff = []time.Duration{
 	5 * time.Second, 10 * time.Second, 20 * time.Second, 40 * time.Second, 80 * time.Second, 160 * time.Second,
 }
@@ -38,23 +43,26 @@ func (m *Manager) random() float64 {
 	return rand.Float64()
 }
 
-// dial connects the paired client. On failure the session is disconnected and
-// a retry is scheduled.
+// dial connects the paired client. A socket whatsmeow already holds counts as
+// success; a deleted device ends the session as logged out; any other failure
+// leaves it disconnected with a retry scheduled.
 func (s *Session) dial() error {
 	s.setStatus(StatusConnecting)
 	s.armDownTimer()
-	if s.client.IsConnected() { // a socket left over from a failed login
-		s.client.Disconnect()
-	}
 	err := s.client.Connect()
 	if s.retired() { // retired (e.g. Shutdown) while connecting
 		s.client.Disconnect()
 		return err
 	}
-	if err != nil {
-		s.setStatus(StatusDisconnected)
-		s.scheduleReconnect()
+	switch {
+	case err == nil, errors.Is(err, whatsmeow.ErrAlreadyConnected):
+		return nil
+	case errors.Is(err, wastore.ErrDeviceDeleted):
+		s.becomeLoggedOut("device deleted by WhatsApp; logged out")
+		return nil
 	}
+	s.setStatus(StatusDisconnected)
+	s.scheduleReconnect()
 	return err
 }
 
@@ -86,6 +94,9 @@ func (s *Session) reconnect(gen int) {
 	s.mu.Unlock()
 	if !current || s.retired() || s.m.isClosed() || status != StatusDisconnected {
 		return
+	}
+	if s.client.IsConnected() { // a socket left over from a failed or stuck login
+		s.client.Disconnect()
 	}
 	if err := s.dial(); err != nil {
 		s.log.Warn("reconnect failed", "error", err)
@@ -126,9 +137,13 @@ func (s *Session) downTimeout(gen int) {
 	}
 	s.status = StatusDisconnected
 	s.downReported = true
+	whatsmeowRetrying := s.autoReconnecting
 	s.mu.Unlock()
 	s.log.Warn("not connected for the grace period; reporting Disconnected", "grace", disconnectGrace.String())
 	s.pushStatus(frappeDisconnected)
+	if !whatsmeowRetrying { // e.g. a login stuck in connecting: nobody else will retry
+		s.scheduleReconnect()
+	}
 }
 
 // stopReconnectLocked cancels a pending retry and grace timer and forgets
@@ -144,6 +159,7 @@ func (s *Session) stopReconnectLocked() {
 	}
 	s.retryAttempt = 0
 	s.downReported = false
+	s.autoReconnecting = false
 }
 
 func (s *Session) stopReconnect() {

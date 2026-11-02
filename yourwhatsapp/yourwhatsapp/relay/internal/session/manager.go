@@ -221,6 +221,9 @@ func (m *Manager) start(ctx context.Context, id string, proxy *string, interacti
 			}
 			return status, nil
 		}
+		if m.redialable(ctx, s, proxy) {
+			return s.connect()
+		}
 		m.retire(s)
 	}
 	acct, err := m.prepareAccount(ctx, id, proxy)
@@ -247,6 +250,20 @@ func (m *Manager) start(ctx context.Context, id string, proxy *string, interacti
 		return s.startQR()
 	}
 	return s.connect()
+}
+
+// redialable reports whether start can dial a disconnected paired session's
+// existing client instead of rebuilding it: a rebuild could leave two sockets
+// while whatsmeow's own auto-reconnect is live. A proxy change needs a new client.
+func (m *Manager) redialable(ctx context.Context, s *Session, proxy *string) bool {
+	if s.retired() || s.client == nil || s.dev == nil || s.dev.ID == nil || s.Status() != StatusDisconnected {
+		return false
+	}
+	acct, found, err := m.st.GetAccount(ctx, s.id)
+	if err != nil || !found || acct.Paused {
+		return false
+	}
+	return proxy == nil || *proxy == acct.Proxy
 }
 
 // PairCode begins phone-number pairing for an unpaired account and returns
