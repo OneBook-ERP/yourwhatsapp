@@ -163,6 +163,39 @@ class AlertsTestCase(LiveSafeTestCase):
 		):
 			alerts.account_status_changed(self.account, "Active", "Disconnected")
 
+	def _relay_account(self, status="Active"):
+		account = frappe.get_doc(
+			{"doctype": "WhatsApp Account", "account_name": f"Alert Relay {uuid.uuid4().hex[:6]}",
+			 "phone_number": "15550009003", "status": status}
+		).insert(ignore_permissions=True)
+		self._patch("yourwhatsapp.yourwhatsapp.api._verify_relay_key")
+		return account
+
+	def test_update_qr_disconnected_alerts(self):
+		# The relay reports an unlinked (logged out) device as update_qr Disconnected.
+		account = self._relay_account()
+		api.update_qr(account.session_id, status="Disconnected")
+		self.assertEqual(len(self._emailed()), 1)
+		self.assertIn("is down", self._emailed()[0])
+		self.assertEqual(len([b for b in self._bells(account.name) if b.for_user == self.recipients]), 1)
+
+	def test_client_outdated_after_update_qr_alerts_once_with_reason(self):
+		account = self._relay_account()
+		api.update_qr(account.session_id, status="Disconnected", reason="client outdated")
+		with patch("frappe.log_error"):
+			api.account_event(account.session_id, "client_outdated")
+		self.assertEqual(len(self._emailed()), 1)
+		self.assertIn("client outdated", self._emailed()[0])
+
+	def test_client_outdated_on_disconnected_account_alerts_once(self):
+		# Down without an alert (e.g. before alerts existed): client_outdated still tells the admins.
+		account = self._relay_account(status="Disconnected")
+		with patch("frappe.log_error"):
+			api.account_event(account.session_id, "client_outdated")
+			api.account_event(account.session_id, "client_outdated")
+		self.assertEqual(len(self._emailed()), 1)
+		self.assertIn("client outdated", self._emailed()[0])
+
 	def test_deleted_account_name_reuse_has_no_spurious_recovery(self):
 		account = frappe.get_doc(
 			{"doctype": "WhatsApp Account", "account_name": "Alert Reuse", "phone_number": "15550009002",
@@ -230,6 +263,59 @@ class AlertWiringTestCase(LiveSafeTestCase):
 	def test_pause_and_logout_are_manual(self):
 		with patch.object(type(self.account), "_relay_post", return_value={}):
 			self.account.pause()
-			self.changed.assert_called_with(self.account.name, "Active", "Paused", reason="manual")
+			self.changed.assert_called_with(self.account.name, "Active", "Paused", "manual")
 			self.account.logout()
-		self.changed.assert_called_with(self.account.name, "Paused", "Disconnected", reason="manual")
+		self.changed.assert_called_with(self.account.name, "Paused", "Disconnected", "manual")
+
+	def _update_qr(self, **kwargs):
+		with patch.object(api, "_verify_relay_key"):
+			api.update_qr(self.account.session_id, **kwargs)
+
+	def test_update_qr_disconnected_goes_through_routing(self):
+		self._update_qr(status="Disconnected")
+		self.changed.assert_called_once_with(self.account.name, "Active", "Disconnected", None)
+
+	def test_update_qr_passes_relay_reason(self):
+		self._update_qr(status="Disconnected", reason="logged out")
+		self.changed.assert_called_once_with(self.account.name, "Active", "Disconnected", "logged out")
+
+	def test_update_qr_disconnected_held_by_pause_is_silent(self):
+		frappe.db.set_value("WhatsApp Account", self.account.name, "status", "Paused")
+		self._update_qr(status="Disconnected")
+		self.changed.assert_not_called()
+		self.assertEqual(frappe.db.get_value("WhatsApp Account", self.account.name, "status"), "Paused")
+
+	def test_client_outdated_on_disconnected_reports_down(self):
+		frappe.db.set_value("WhatsApp Account", self.account.name, "status", "Disconnected")
+		with patch("frappe.log_error"), patch.object(api, "_verify_relay_key"):
+			api.account_event(self.account.session_id, "client_outdated")
+		self.report_down_mock.assert_called_once_with(self.account.name, "Disconnected", "client outdated")
+
+	def test_client_outdated_on_active_does_not_report_twice(self):
+		with patch("frappe.log_error"), patch.object(api, "_verify_relay_key"):
+			api.account_event(self.account.session_id, "client_outdated")
+		self.report_down_mock.assert_not_called()
+
+	def test_resume_lifts_pause_silently(self):
+		frappe.db.set_value("WhatsApp Account", self.account.name, "status", "Paused")
+		with patch.object(type(self.account), "_relay_post", return_value={}):
+			self.account.resume()
+		self.changed.assert_called_once_with(self.account.name, "Paused", "Disconnected", None)
+
+	def test_resume_keeps_active_account_active(self):
+		with patch.object(type(self.account), "_relay_post", return_value={}):
+			self.account.resume()
+		self.changed.assert_not_called()
+		self.assertEqual(frappe.db.get_value("WhatsApp Account", self.account.name, "status"), "Active")
+
+	def test_form_status_edit_is_manual(self):
+		account = frappe.get_doc("WhatsApp Account", self.account.name)
+		account.status = "RateLimited"
+		account.save(ignore_permissions=True)
+		self.changed.assert_called_once_with(self.account.name, "Active", "RateLimited", "manual")
+
+	def test_form_save_without_status_change_is_silent(self):
+		account = frappe.get_doc("WhatsApp Account", self.account.name)
+		account.proxy = "socks5://proxy.test:1080"
+		account.save(ignore_permissions=True)
+		self.changed.assert_not_called()

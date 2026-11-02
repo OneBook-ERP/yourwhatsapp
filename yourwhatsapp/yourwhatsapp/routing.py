@@ -56,17 +56,27 @@ def pick_failover_account(failed_account):
 	return pick_account(exclude=[failed_account])
 
 
+def set_account_status(account, status, reason=None, **values):
+	"""The one writer of WhatsApp Account.status (with any other field `values`).
+	Callers apply their own guards (relay_may_set_status, Paused) first."""
+	old = frappe.db.get_value("WhatsApp Account", account, "status")
+	frappe.db.set_value("WhatsApp Account", account, {"status": status, **values})
+	status_written(account, old, status, reason)
+
+
+def status_written(account, old, new, reason=None):
+	"""What must follow every status write, including a form save: Settings
+	defaults point at an Active account, and the health alert hook runs."""
+	fill_default_accounts(account)
+	alerts.account_status_changed(account, old, new, reason)
+
+
 def mark_rate_limited(account, until=None, reason=None) -> bool:
 	"""Flag an account RateLimited unless an admin has Paused it: Frappe owns admin intent."""
-	old = frappe.db.get_value("WhatsApp Account", account, "status")
-	if old == "Paused":
+	if frappe.db.get_value("WhatsApp Account", account, "status") == "Paused":
 		return False
-	values = {"status": "RateLimited"}
-	if until:
-		values["rate_limited_until"] = until
-	frappe.db.set_value("WhatsApp Account", account, values)
-	repoint_default_accounts()
-	alerts.account_status_changed(account, old, "RateLimited", reason)
+	values = {"rate_limited_until": until} if until else {}
+	set_account_status(account, "RateLimited", reason, **values)
 	return True
 
 
@@ -81,13 +91,10 @@ def set_account_active(account, connected_at=True):
 
 	if not relay_may_set_status(account, "Active"):
 		return False
-	old = frappe.db.get_value("WhatsApp Account", account, "status")
-	values = {"status": "Active", "rate_limited_until": None}
+	values = {"rate_limited_until": None}
 	if connected_at:
 		values["connected_at"] = now_datetime()
-	frappe.db.set_value("WhatsApp Account", account, values)
-	fill_default_accounts(account)
-	alerts.account_status_changed(account, old, "Active", None)
+	set_account_status(account, "Active", **values)
 	return True
 
 
@@ -133,10 +140,7 @@ def mark_disconnected(account, reason=None) -> bool:
 
 	if not relay_may_set_status(account, "Disconnected"):
 		return False
-	old = frappe.db.get_value("WhatsApp Account", account, "status")
-	frappe.db.set_value("WhatsApp Account", account, "status", "Disconnected")
-	repoint_default_accounts()
-	alerts.account_status_changed(account, old, "Disconnected", reason)
+	set_account_status(account, "Disconnected", reason)
 	return True
 
 

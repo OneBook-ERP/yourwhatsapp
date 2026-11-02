@@ -40,20 +40,18 @@ def account_status_changed(account: str, old: str | None, new: str, reason: str 
 		return
 	if old == new or "Active" not in (old, new):
 		return
-	try:
-		if new == "Active":
-			_send_recovery(account, old)
-		else:
-			_send_down(account, new, reason)
-	except Exception:
-		# A failing alert must never undo or block the status change that triggered it,
-		# not even when the transaction is too broken to write the Error Log.
-		try:
-			frappe.log_error(
-				title="WhatsApp health alert failed", reference_doctype="WhatsApp Account", reference_name=account
-			)
-		except Exception:
-			pass
+	if new == "Active":
+		_safely(account, _send_recovery, account, old)
+	else:
+		_safely(account, _send_down, account, new, reason)
+
+
+def report_down(account: str, status: str, reason: str) -> None:
+	"""A down alert for an account that was already down, when a reason worth
+	telling turns up (client outdated); skipped if this outage was alerted."""
+	if frappe.cache.get_value(alert_key(account, "down_sent")):
+		return
+	_safely(account, _send_down, account, status, reason)
 
 
 def alert_recipients() -> list[str]:
@@ -151,3 +149,17 @@ def _log_no_email_account_once():
 		title="WhatsApp health alert not emailed",
 		message="No default outgoing Email Account is enabled, so WhatsApp health alerts only reach the bell.",
 	)
+
+
+def _safely(account: str, send, *args):
+	try:
+		send(*args)
+	except Exception:
+		# A failing alert must never undo or block the status change that triggered it,
+		# not even when the transaction is too broken to write the Error Log.
+		try:
+			frappe.log_error(
+				title="WhatsApp health alert failed", reference_doctype="WhatsApp Account", reference_name=account
+			)
+		except Exception:
+			pass

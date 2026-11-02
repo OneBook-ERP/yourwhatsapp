@@ -88,6 +88,7 @@ class TestAlertIsolation(LiveSafeTestCase):
 	def test_alert_delivery_is_mocked(self):
 		self.assertIsInstance(self.alerts_mock, MagicMock)
 		self.assertIs(alerts.account_status_changed, self.alerts_mock)
+		self.assertIs(alerts.report_down, self.report_down_mock)
 		self.assertIsInstance(frappe.sendmail, MagicMock)
 
 	def test_alert_keys_are_test_namespaced_and_cleared(self):

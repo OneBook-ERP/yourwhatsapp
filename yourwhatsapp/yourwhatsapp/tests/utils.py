@@ -24,7 +24,7 @@ class LiveSafeTestCase(IntegrationTestCase):
 	Health alerts are isolated too: `frappe.sendmail` is a mock (`sendmail_mock`)
 	and alert Redis keys live in a "test:" namespace that tearDown clears, so no
 	test can mail anyone or write a real `yourwhatsapp:alert:*` key. Alert
-	delivery is a mock (`alerts_mock`) unless the class sets `real_alerts = True`."""
+	delivery is a mock (`alerts_mock`, `report_down_mock`) unless the class sets `real_alerts = True`."""
 
 	real_alerts = False
 
@@ -46,11 +46,12 @@ class LiveSafeTestCase(IntegrationTestCase):
 			return key
 
 		self._start_patch(patch.object(alerts, "alert_key", tracked_alert_key))
-		self.alerts_mock = None
+		self.alerts_mock = self.report_down_mock = None
 		if not self.real_alerts:
 			self.alerts_mock = self._start_patch(
 				patch.object(alerts, "account_status_changed", MagicMock(name="account_status_changed"))
 			)
+			self.report_down_mock = self._start_patch(patch.object(alerts, "report_down", MagicMock(name="report_down")))
 
 	def _start_patch(self, started):
 		mock = started.start()

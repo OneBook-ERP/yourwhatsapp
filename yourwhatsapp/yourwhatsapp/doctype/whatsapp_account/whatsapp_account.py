@@ -6,16 +6,29 @@ from frappe.utils import random_string
 
 from yourwhatsapp.yourwhatsapp import alerts
 from yourwhatsapp.yourwhatsapp.relay_client import relay_settings
-from yourwhatsapp.yourwhatsapp.routing import repoint_default_accounts, set_account_active
+from yourwhatsapp.yourwhatsapp.routing import (
+	repoint_default_accounts,
+	set_account_active,
+	set_account_status,
+	status_written,
+)
 
 TIMEOUT = 15
 ALREADY_PAIRED = "already_paired"
+ADMIN_HOLDS = ("Paused", "RateLimited")
 
 
 class WhatsAppAccount(Document):
 	def before_insert(self):
 		if not self.session_id:
 			self.session_id = f"acc-{random_string(10).lower()}"
+
+	def on_update(self):
+		# An admin editing Status on the form (e.g. a manual RateLimited) is a
+		# status write too: same follow-up as the routing helpers, and silent.
+		before = self.get_doc_before_save()
+		if before and before.status != self.status:
+			status_written(self.name, before.status, self.status, reason="manual")
 
 	def on_trash(self):
 		# Before Frappe's link check, so a Settings default doesn't block the delete.
@@ -50,17 +63,15 @@ class WhatsAppAccount(Document):
 	def pause(self):
 		self._check_admin()
 		self._relay_post("pause")
-		old = frappe.db.get_value("WhatsApp Account", self.name, "status")
-		self.db_set("status", "Paused")
-		alerts.account_status_changed(self.name, old, "Paused", reason="manual")
-		repoint_default_accounts()
+		set_account_status(self.name, "Paused", reason="manual")
 
 	@frappe.whitelist()
 	def resume(self):
 		self._check_admin()
 		result = self._relay_post("resume", self._proxy_body())
 		# An admin resuming lifts their own Paused/ban hold, which the relay may not.
-		self.db_set("status", "Disconnected")
+		if frappe.db.get_value("WhatsApp Account", self.name, "status") in ADMIN_HOLDS:
+			set_account_status(self.name, "Disconnected")
 		if result.get("status") == "connected":
 			set_account_active(self.name)
 
@@ -68,10 +79,7 @@ class WhatsAppAccount(Document):
 	def logout(self):
 		self._check_admin()
 		self._relay_post("logout")
-		old = frappe.db.get_value("WhatsApp Account", self.name, "status")
-		self.db_set({"status": "Disconnected", "connected_at": None})
-		alerts.account_status_changed(self.name, old, "Disconnected", reason="manual")
-		repoint_default_accounts()
+		set_account_status(self.name, "Disconnected", reason="manual", connected_at=None)
 
 	def _proxy_body(self):
 		# "" clears the relay's stored proxy; null would keep it. A change

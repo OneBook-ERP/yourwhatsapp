@@ -2,12 +2,13 @@ import hmac
 import frappe
 from frappe.utils import get_datetime, now_datetime
 
+from yourwhatsapp.yourwhatsapp import alerts
 from yourwhatsapp.yourwhatsapp.relay_client import RELAY_RESTARTED, increment_daily_count
 from yourwhatsapp.yourwhatsapp.routing import (
 	mark_disconnected,
 	mark_rate_limited,
-	repoint_default_accounts,
 	set_account_active,
+	set_account_status,
 	to_system_datetime,
 )
 
@@ -15,6 +16,7 @@ STATUS_RANK = {"Queued": 0, "Sent": 1, "Delivered": 2, "Read": 3}
 # relay_restarted goes through the same job, which retries it on the same account.
 FAILOVER_ERROR_CODES = {"session_unavailable", "send_failed", "temp_banned", RELAY_RESTARTED}
 FAILOVER_METHOD = "yourwhatsapp.yourwhatsapp.relay_client.handle_async_failure"
+CLIENT_OUTDATED = "client outdated"
 
 
 def _verify_relay_key():
@@ -222,7 +224,10 @@ def account_event(session_id: str, event: str, until: str | None = None):
 
 	if event == "client_outdated":
 		# Nothing on the account can fix this: the relay's whatsmeow must be upgraded.
-		mark_disconnected(account, reason="client outdated")
+		was = frappe.db.get_value("WhatsApp Account", account, "status")
+		if mark_disconnected(account, reason=CLIENT_OUTDATED) and was != "Active":
+			# Already down, so no transition alerts; tell the admins unless this outage was reported.
+			alerts.report_down(account, "Disconnected", CLIENT_OUTDATED)
 		frappe.log_error(
 			title="WhatsApp client outdated",
 			message="WhatsApp rejected the relay's client as outdated; upgrade whatsmeow in the relay and restart it.",
@@ -238,7 +243,9 @@ def account_event(session_id: str, event: str, until: str | None = None):
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
-def update_qr(session_id: str, qr_base64: str | None = None, status: str | None = None):
+def update_qr(
+	session_id: str, qr_base64: str | None = None, status: str | None = None, reason: str | None = None
+):
 	_verify_relay_key()
 
 	account = frappe.db.get_value("WhatsApp Account", {"session_id": session_id}, "name")
@@ -250,9 +257,10 @@ def update_qr(session_id: str, qr_base64: str | None = None, status: str | None 
 			# A scanned QR is spent, and a leftover one is only a liability.
 			_delete_qr_image(account)
 			frappe.db.set_value("WhatsApp Account", account, "qr_code", None)
+	elif status == "Disconnected":
+		mark_disconnected(account, reason=reason)
 	elif status and relay_may_set_status(account, status):
-		frappe.db.set_value("WhatsApp Account", account, "status", status)
-		repoint_default_accounts()
+		set_account_status(account, status, reason)
 
 	if qr_base64:
 		_save_qr_image(account, qr_base64)
