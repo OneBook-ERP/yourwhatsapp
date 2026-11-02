@@ -697,6 +697,25 @@ class TestWhatsAppSettingsRelay(IntegrationTestCase):
 		frappe.set_user("Administrator")
 		self.assertEqual(self._keys(), (OLD_KEY, None))
 
+	def test_write_password_keeps_settings_modified(self):
+		# Background key writes must not make an open Settings form stale (TimestampMismatchError).
+		modified = frappe.db.get_single_value("WhatsApp Settings", "modified")
+		ws.write_password("relay_api_key", OLD_KEY)
+		ws.write_password("relay_pending_key", None)
+		self.assertEqual(frappe.db.get_single_value("WhatsApp Settings", "modified"), modified)
+
+	def test_auto_test_connection_uses_short_timeout(self):
+		self._set_keys(current=OLD_KEY)
+		relay = self._use(FakeRelay(mode="claimed", current=OLD_KEY))
+		timeouts = []
+		ws.requests.request.side_effect = lambda *a, **kw: timeouts.append(kw["timeout"]) or relay(*a, **kw)
+
+		self._settings().test_connection(auto=1)
+		self._settings().test_connection()
+
+		self.assertEqual(timeouts, [ws.AUTO_TEST_TIMEOUT, ws.TIMEOUT])
+		self.assertEqual(ws.AUTO_TEST_TIMEOUT, 5)
+
 	def test_key_never_in_error_message(self):
 		pending = "q" * 43
 

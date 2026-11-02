@@ -5,10 +5,13 @@ import frappe
 import requests
 from frappe import _
 from frappe.model.document import Document
+from frappe.utils import cint
 from frappe.utils.password import remove_encrypted_password, set_encrypted_password
 
 DOCTYPE = "WhatsApp Settings"
 TIMEOUT = 15
+# The form tests the connection on every load: a dead relay must not hold it up for long.
+AUTO_TEST_TIMEOUT = 5
 KEY_LOCK_TIMEOUT = 10  # seconds to wait for another key change to commit its pending key
 ALREADY_CLAIMED = (
 	"This relay is already claimed. If it's yours, use Rotate Key with the current key, "
@@ -126,9 +129,9 @@ class WhatsAppSettings(Document):
 			return self._claim(pending)
 		current = self._current_key()
 		accepted = self._accepts(current) if current else REJECTED
-		if accepted is ACCEPTED:
+		if accepted == ACCEPTED:
 			return self._rotate(current, pending)
-		if accepted is UNKNOWN:
+		if accepted == UNKNOWN:
 			return _failed(PROBE_UNKNOWN, self._known_keys())
 		return {"ok": False, "state": "keys_rejected", "message": KEYS_REJECTED}
 
@@ -164,12 +167,15 @@ class WhatsAppSettings(Document):
 		return _failed(_relay_error(response), self._known_keys())
 
 	@frappe.whitelist()
-	def test_connection(self):
-		"""The relay's /info plus a state: ok, unreachable, key_rejected or unclaimed."""
+	def test_connection(self, auto=False):
+		"""The relay's /info plus a state: ok, unreachable, key_rejected or unclaimed.
+
+		`auto`: the form's own check on load, which gives up sooner."""
 		frappe.only_for("System Manager")
 		pending = bool(self.get_password("relay_pending_key", raise_exception=False))
+		timeout = AUTO_TEST_TIMEOUT if cint(auto) else TIMEOUT
 		try:
-			response = self._request("GET", "/info", key=self._current_key())
+			response = self._request("GET", "/info", key=self._current_key(), timeout=timeout)
 		except requests.exceptions.RequestException as exc:
 			return self._unreachable_state(_unreachable(exc), pending)
 		if response.status_code == 401:
@@ -221,10 +227,10 @@ class WhatsAppSettings(Document):
 			# Outcome unknown (or the relay lost its claim): keep the key for Retry.
 			return _failed(_relay_error(response) + " " + _("Use Retry."), secrets_shown)
 		accepted = self._accepts(key)
-		if accepted is ACCEPTED:
+		if accepted == ACCEPTED:
 			# Refused now, but an earlier attempt already landed.
 			return self._promote_pending(key)
-		if accepted is UNKNOWN:
+		if accepted == UNKNOWN:
 			return _failed(PROBE_UNKNOWN, secrets_shown)
 		write_password("relay_pending_key", None)
 		return _failed(_refusal(response), secrets_shown)
@@ -254,12 +260,12 @@ class WhatsAppSettings(Document):
 		response.raise_for_status()
 		return _json(response)
 
-	def _request(self, method, path, key=None, body=None):
+	def _request(self, method, path, key=None, body=None, timeout=TIMEOUT):
 		base_url = (self.relay_base_url or "").strip().rstrip("/")
 		if not base_url:
 			frappe.throw(_("Set the Relay Base URL first."))
 		headers = {"x-api-key": key} if key else {}
-		return requests.request(method, f"{base_url}{path}", headers=headers, json=body, timeout=TIMEOUT)
+		return requests.request(method, f"{base_url}{path}", headers=headers, json=body, timeout=timeout)
 
 	def _refuse_if_pending(self):
 		if self.get_password("relay_pending_key", raise_exception=False):
@@ -295,13 +301,14 @@ def adopt_pending_key():
 def write_password(fieldname, value):
 	"""Store a Settings password directly, without saving (and returning) the whole doc.
 
-	The Singles row holds the usual mask so a later form save keeps the secret."""
+	The Singles row holds the usual mask so a later form save keeps the secret.
+	Settings' modified stays as it is, so an open form can still be saved."""
 	if value:
 		set_encrypted_password(DOCTYPE, DOCTYPE, value, fieldname)
-		frappe.db.set_single_value(DOCTYPE, fieldname, "*" * len(value))
+		frappe.db.set_single_value(DOCTYPE, fieldname, "*" * len(value), update_modified=False)
 	else:
 		remove_encrypted_password(DOCTYPE, DOCTYPE, fieldname)
-		frappe.db.set_single_value(DOCTYPE, fieldname, None)
+		frappe.db.set_single_value(DOCTYPE, fieldname, None, update_modified=False)
 
 
 def key_lock_name():

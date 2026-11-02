@@ -16,12 +16,13 @@ frappe.ui.form.on("WhatsApp Settings", {
 			return;
 		}
 		frm.add_custom_button(__("Test Connection"), () => test_connection(frm), __("Relay"));
-		test_connection(frm);
+		// The check on load gives up after the server's AUTO_TEST_TIMEOUT (5 s), not the full 15 s.
+		test_connection(frm, true);
 	},
 });
 
-function test_connection(frm) {
-	frm.call({ method: "test_connection", doc: frm.doc }).then((r) => {
+function test_connection(frm, auto = false) {
+	frm.call({ method: "test_connection", doc: frm.doc, args: { auto: auto ? 1 : 0 } }).then((r) => {
 		const info = r.message || {};
 		frm.set_df_property("relay_api_key", "read_only", info.mode === "env" ? 0 : 1);
 		render_panel(frm, info);
@@ -80,7 +81,9 @@ function run(frm, method) {
 				indicator: result.ok ? "green" : "orange",
 			});
 			return frm.reload_doc();
-		});
+		})
+		// A refused save (or call) has already shown its own message; nothing more to do.
+		.catch(() => {});
 }
 
 function render_panel(frm, info) {
