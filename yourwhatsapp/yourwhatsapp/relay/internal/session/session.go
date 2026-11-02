@@ -41,6 +41,13 @@ const (
 	frappeDisconnected = "Disconnected"
 )
 
+// Reasons a Disconnected push carries; each needs the admin to act.
+const (
+	reasonClientOutdated = "client outdated"
+	reasonLoggedOut      = "logged out"
+	reasonStreamReplaced = "another client took over this number"
+)
+
 // account_event events besides StatusTempBanned.
 const eventClientOutdated = "client_outdated"
 
@@ -66,6 +73,8 @@ type qrPayload struct {
 	SessionID string `json:"session_id"`
 	QRBase64  string `json:"qr_base64,omitempty"`
 	Status    string `json:"status,omitempty"`
+	// Reason says why a Disconnected needs the admin (Frappe shows it in the alert).
+	Reason string `json:"reason,omitempty"`
 }
 
 type accountEventPayload struct {
@@ -261,6 +270,10 @@ func (s *Session) pushStatus(status string) {
 	s.callback(outbox.MethodQR, qrPayload{SessionID: s.id, Status: status})
 }
 
+func (s *Session) pushDisconnected(reason string) {
+	s.callback(outbox.MethodQR, qrPayload{SessionID: s.id, Status: frappeDisconnected, Reason: reason})
+}
+
 // callback hands a payload to the outbox. Payloads are never logged.
 func (s *Session) callback(method string, payload any) {
 	ctx, cancel := context.WithTimeout(context.Background(), callbackTimeout)
@@ -346,7 +359,7 @@ func (s *Session) becomeLoggedOut(msg string, attrs ...any) {
 	s.jid = types.EmptyJID
 	s.mu.Unlock()
 	s.log.Warn(msg, attrs...)
-	s.pushStatus(frappeDisconnected)
+	s.pushDisconnected(reasonLoggedOut)
 }
 
 func (s *Session) onStreamReplaced() {
@@ -354,7 +367,7 @@ func (s *Session) onStreamReplaced() {
 	s.stopReconnect()
 	s.client.Disconnect()
 	s.setStatus(StatusDisconnected)
-	s.pushStatus(frappeDisconnected)
+	s.pushDisconnected(reasonStreamReplaced)
 }
 
 // onConnectionLost handles failures after which whatsmeow does not reconnect
@@ -377,7 +390,7 @@ func (s *Session) onClientOutdated() {
 	s.stopReconnect()
 	s.client.Disconnect()
 	s.setStatus(StatusDisconnected)
-	s.pushStatus(frappeDisconnected)
+	s.pushDisconnected(reasonClientOutdated)
 	s.callback(outbox.MethodAccountEvent, accountEventPayload{SessionID: s.id, Event: eventClientOutdated})
 }
 

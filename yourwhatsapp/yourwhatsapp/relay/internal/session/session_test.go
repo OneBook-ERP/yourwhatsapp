@@ -296,3 +296,40 @@ func TestReceiptEnqueuesStatus(t *testing.T) {
 		}
 	}
 }
+
+// A Disconnected push says why when the admin has something to act on;
+// Frappe puts the reason in the health alert.
+func TestDisconnectedPushCarriesReason(t *testing.T) {
+	cases := []struct {
+		name  string
+		event any
+		want  string
+	}{
+		{"client outdated", &events.ClientOutdated{}, "client outdated"},
+		{"logged out", &events.LoggedOut{Reason: events.ConnectFailureLoggedOut}, "logged out"},
+		{"stream replaced", &events.StreamReplaced{}, "another client took over this number"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			fc := h.connected("A", testJID)
+			fc.emit(tc.event)
+			pushes := h.callbacks(outbox.MethodQR)
+			last := pushes[len(pushes)-1]
+			if last["status"] != "Disconnected" || last["reason"] != tc.want {
+				t.Errorf("last push = %v, want Disconnected with reason %q", last, tc.want)
+			}
+		})
+	}
+}
+
+// A grace-period Disconnected carries no reason: the alert says only Disconnected.
+func TestConnectedPushHasNoReason(t *testing.T) {
+	h := newHarness(t)
+	h.connected("A", testJID)
+	for _, p := range h.callbacks(outbox.MethodQR) {
+		if _, has := p["reason"]; has {
+			t.Errorf("push carries a reason: %v", p)
+		}
+	}
+}
