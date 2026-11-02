@@ -44,8 +44,10 @@ class WhatsAppMessage(Document):
 		if not self.reply_to_message_id:
 			# CRM copies the target's message_id, which only a sent message has.
 			frappe.throw(_("The original message hasn't been sent yet"), frappe.ValidationError)
-		target = reply_target(self.reply_to_message_id, self.to)
-		account = target and target.whatsapp_account
+		target = reply_target(self.reply_to_message_id, self.to, in_chat_only=True)
+		if not target:
+			frappe.throw(_("Can't find that message in this chat"), frappe.ValidationError)
+		account = target.whatsapp_account
 		if not account or frappe.db.get_value("WhatsApp Account", account, "status") != "Active":
 			frappe.throw(
 				_("Reaction needs {0} to be connected").format(account or _("the original WhatsApp Account")),
@@ -103,10 +105,11 @@ class WhatsAppMessage(Document):
 			)
 
 
-def reply_target(message_id: str | None, customer: str | None):
+def reply_target(message_id: str | None, customer: str | None, in_chat_only: bool = False):
 	"""The WhatsApp Message a reply quotes or a reaction targets, by WhatsApp's
 	message id. An id is only unique per chat, so the row in the chat with
-	`customer` wins, then the newest."""
+	`customer` wins, then the newest. A reaction (`in_chat_only`) must hit a
+	row in this chat; a reply may quote any (the quote carries its own text)."""
 	if not message_id:
 		return None
 	rows = frappe.get_all(
@@ -116,4 +119,5 @@ def reply_target(message_id: str | None, customer: str | None):
 		order_by="creation desc",
 	)
 	in_chat = [r for r in rows if (r["from"] if r.type == "Incoming" else r.to) == customer]
-	return (in_chat or rows or [None])[0]
+	fallback = [] if in_chat_only else rows
+	return (in_chat or fallback or [None])[0]

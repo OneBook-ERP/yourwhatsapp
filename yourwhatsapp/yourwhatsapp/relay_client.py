@@ -30,6 +30,7 @@ RELAY_RESTARTED = "relay_restarted"
 # relay's exact details ("session is not running", "session is not_started",
 # "session is logged_out") are pinned by Go's TestSessionDownDetails.
 SESSION_DOWN = re.compile(r"not running|not[_ ]started|logged[_ ]out")
+TARGET_GONE = "The original message no longer exists"
 
 
 def relay_settings():
@@ -83,7 +84,7 @@ def _reply_payload(doc, sending_account: str):
 	"""What the relay needs to quote (or react to) the target. A target Frappe
 	doesn't have sends a reply as a plain message; a reaction can't get here
 	without one (WhatsAppMessage refuses it at insert)."""
-	target = reply_target(doc.reply_to_message_id, doc.to)
+	target = reply_target(doc.reply_to_message_id, doc.to, in_chat_only=_is_reaction(doc))
 	if not target:
 		return {}
 	from_me = target.type == "Outgoing"
@@ -95,9 +96,18 @@ def _reply_payload(doc, sending_account: str):
 	if from_me and target.whatsapp_account != sending_account:
 		# Rotation replies from another number than the one that sent the
 		# quote. From the same one the relay uses its own JID (or LID).
-		phone = frappe.db.get_value("WhatsApp Account", target.whatsapp_account, "phone_number")
-		if normalize_number(phone):
-			payload["reply_participant"] = normalize_number(phone)
+		phone = normalize_number(
+			frappe.db.get_value("WhatsApp Account", target.whatsapp_account, "phone_number")
+		)
+		if phone:
+			payload["reply_participant"] = phone
+		else:
+			# Accepted: the relay falls back to the sending number's own JID, so
+			# WhatsApp may attribute the quote to the wrong number of ours.
+			frappe.logger("yourwhatsapp").warning(
+				f"reply {doc.name}: quoted account {target.whatsapp_account} has no phone number; "
+				"the quote may be attributed to the sending number"
+			)
 	return payload
 
 
@@ -270,6 +280,20 @@ def _error_code(response) -> str | None:
 		return None
 
 
+def _rejection_reason(doc, response, code) -> str:
+	# The relay refuses a reaction without a target id: Frappe found no target row to send.
+	if _is_reaction(doc) and "reply_to_message_id" in _error_detail(response):
+		return TARGET_GONE
+	return f"Relay rejected message: {code}"
+
+
+def _error_detail(response) -> str:
+	try:
+		return response.json().get("detail") or ""
+	except Exception:
+		return ""
+
+
 def _session_down(response) -> bool:
 	try:
 		body = response.json()
@@ -347,7 +371,7 @@ def _dispatch(doc):
 			return
 		code = _error_code(response)
 		if status in (400, 422):
-			_fail(doc, f"Relay rejected message: {code or status}")
+			_fail(doc, _rejection_reason(doc, response, code or status))
 			return
 		if status == 429:
 			mark_rate_limited(account.name, _ban_expiry(response))

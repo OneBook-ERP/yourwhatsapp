@@ -198,6 +198,38 @@ class TestRepliesReactions(LiveSafeTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			self._reaction("NOT-IN-FRAPPE")
 
+	def test_reaction_target_only_in_another_chat_refused(self):
+		# A WhatsApp id is unique per chat only: a row in another chat is not the target.
+		self._sent_outgoing("OTHER-CHAT", account=self.account_b, to="15559990000", message="other chat")
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._reaction("OTHER-CHAT")
+		self.assertIn("Can't find that message in this chat", str(ctx.exception))
+
+	def test_reply_target_in_another_chat_still_quoted(self):
+		# Replies keep the fallback: the quote carries its own text.
+		self._sent_outgoing("OTHER-Q", account=self.account_b, to="15559990000", message="other chat")
+		body, _ = self._payload(self._reply("OTHER-Q"))
+		self.assertEqual(body["reply_to_message_id"], "OTHER-Q")
+		self.assertEqual(body["reply_text"], "other chat")
+
+	def test_reaction_target_vanished_fails_clearly(self):
+		target = self._incoming("IN-GONE", account=self.account_a)
+		reaction = self._reaction("IN-GONE")
+		frappe.delete_doc("WhatsApp Message", target.name, force=True, ignore_permissions=True)
+		bad = relay_response(400, {"error": "bad_request", "detail": "reply_to_message_id is required for a reaction"})
+		self._payload(reaction, bad)
+		row = self._row(reaction.name)
+		self.assertEqual((row.status, row.error_reason), ("Failed", "The original message no longer exists"))
+
+	def test_reply_participant_missing_phone_warns(self):
+		frappe.db.set_value("WhatsApp Account", self.account_a.name, "phone_number", "")
+		self._sent_outgoing("OUT-NOPHONE", account=self.account_a, message="sent from A")
+		with patch("frappe.logger") as logger:
+			body, _ = self._payload(self._reply("OUT-NOPHONE", account=self.account_b))
+		self.assertNotIn("reply_participant", body)
+		logger.return_value.warning.assert_called_once()
+		self.assertIn(self.account_a.name, logger.return_value.warning.call_args.args[0])
+
 	def test_reaction_to_unsent_message_refused(self):
 		# CRM copies the target's message_id, which an unsent row doesn't have yet.
 		with self.assertRaises(frappe.ValidationError) as ctx:
