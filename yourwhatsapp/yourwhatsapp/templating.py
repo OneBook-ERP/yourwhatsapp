@@ -22,6 +22,8 @@ BLOCKED_FIELDTYPES = {
 	"JSON",
 }
 USER_FIELDS = {"full_name", "first_name", "last_name"}
+# Standard fields that hold a staff user's email address.
+BLOCKED_DEFAULT_FIELDS = {"owner", "modified_by"}
 NUMERIC_FIELDTYPES = {"Int", "Float", "Currency", "Percent"}
 
 
@@ -51,11 +53,14 @@ def render(text, values) -> str:
 
 
 def resolve(template_name, reference_doctype, reference_name) -> list[str]:
-	"""Values for {{1}}..{{max}}, read with system permissions (it's a system send)."""
+	"""Values for {{1}}..{{max}}. The sending user must be able to read the
+	reference document and any document a dotted field reads through."""
 	template = frappe.get_doc("WhatsApp Templates", template_name)
 	numbers = placeholders(template.template)
 	rows = {row.placeholder: row for row in template.parameters}
 	reference = _reference_doc(reference_doctype, reference_name)
+	if reference:
+		_check_read(reference)
 	values = [""] * (max(numbers) if numbers else 0)
 	problems = []
 	for n in numbers:
@@ -114,10 +119,24 @@ def _read(doc, field):
 	if not target or not _has_value(value):
 		return _to_text(value, frappe.get_meta(doc.doctype).get_field(head), doc)
 	linked = frappe.get_doc(_link_target(doc.doctype, head), value)
+	_check_read(linked)
 	return _to_text(linked.get(target), linked.meta.get_field(target), linked)
 
 
+def _check_read(doc):
+	"""A template must not copy into a message what the sending user couldn't open themselves."""
+	user = frappe.session.user
+	if user == "Administrator" or frappe.has_permission(doc.doctype, "read", doc=doc, user=user):
+		return
+	frappe.throw(
+		_("You don't have permission to read {0} {1}, so a template can't use it.").format(doc.doctype, doc.name),
+		frappe.PermissionError,
+	)
+
+
 def _usable_field_error(doctype, fieldname) -> str | None:
+	if fieldname in BLOCKED_DEFAULT_FIELDS:
+		return _("field {0} can't be used in templates").format(fieldname)
 	if fieldname in default_fields:
 		return None
 	df = frappe.get_meta(doctype).get_field(fieldname)

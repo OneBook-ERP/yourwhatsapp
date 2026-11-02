@@ -249,3 +249,52 @@ class TestTemplateParameters(IntegrationTestCase):
 		with self.assertRaises(frappe.ValidationError) as ctx:
 			resolve("TP Unknown", "CRM Lead", lead.name)
 		self.assertIn("CRM Lead has no field no_such_field", str(ctx.exception))
+
+	def test_template_validate_rejects_owner_and_modified_by(self):
+		for doctype, field in (
+			("CRM Lead", "owner"),
+			("CRM Lead", "modified_by"),
+			("CRM Deal", "lead.owner"),
+			("CRM Deal", "lead.modified_by"),
+		):
+			with self.subTest(field=field):
+				with self.assertRaises(frappe.ValidationError) as ctx:
+					self._template(f"TP Creator {field}", "Hi {{1}}", [(1, field, None)], for_doctype=doctype)
+				self.assertIn("can't be used in templates", str(ctx.exception))
+		# Other standard fields stay usable.
+		self._template("TP Name", "Ref {{1}}", [(1, "name", None)], for_doctype="CRM Lead")
+
+	def test_resolve_needs_read_permission_on_reference(self):
+		self._template("TP Perm", "Hi {{1}}", [(1, "first_name", None)])
+		lead = self._lead()
+		frappe.set_user(self._user_without_crm_access())
+		try:
+			with self.assertRaises(frappe.PermissionError):
+				resolve("TP Perm", "CRM Lead", lead.name)
+		finally:
+			frappe.set_user("Administrator")
+		self.assertEqual(resolve("TP Perm", "CRM Lead", lead.name), ["Ana"])
+
+	def test_resolve_needs_read_permission_on_linked_doc(self):
+		self._template("TP Perm Link", "Hi {{1}}", [(1, "lead.first_name", None)], for_doctype="CRM Deal")
+		deal = frappe.get_doc({"doctype": "CRM Deal", "lead": self._lead().name}).insert(ignore_permissions=True)
+
+		def deny_leads(doctype=None, ptype="read", doc=None, user=None, **kwargs):
+			return doctype != "CRM Lead"
+
+		frappe.set_user(self._user_without_crm_access())
+		try:
+			with patch("frappe.has_permission", side_effect=deny_leads):
+				with self.assertRaises(frappe.PermissionError) as ctx:
+					resolve("TP Perm Link", "CRM Deal", deal.name)
+			self.assertIn("CRM Lead", str(ctx.exception))
+		finally:
+			frappe.set_user("Administrator")
+
+	def _user_without_crm_access(self):
+		email = "tp-no-crm@example.com"
+		if not frappe.db.exists("User", email):
+			frappe.get_doc(
+				{"doctype": "User", "email": email, "first_name": "No CRM", "send_welcome_email": 0}
+			).insert(ignore_permissions=True)
+		return email

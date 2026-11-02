@@ -96,7 +96,7 @@ New table `relay_config` (single row): `api_key` (plaintext, see Key storage), `
   - `placeholder` (Int, 1-based, required);
   - `field` (Data, required): a fieldname on the reference doctype, or `link_field.target_field` for one level of Link traversal;
   - `default_value` (Data, optional).
-- **Reference fallback (decided):** if the message has no reference, the existing number-based CRM Lead/Deal lookup (`_link_crm_reference`) runs first, moved into `before_insert` before resolution. One level of link traversal covers e.g. Deal → `lead.first_name`. Resolution reads with system permissions: it's a system send, as in CRM.
+- **Reference fallback (decided):** if the message has no reference, the existing number-based CRM Lead/Deal lookup (`_link_crm_reference`) runs first, moved into `before_insert` before resolution. One level of link traversal covers e.g. Deal → `lead.first_name`. Resolution checks `frappe.has_permission(read)` for the sending user (`frappe.session.user`; Administrator passes) on the reference doc and on any doc a dotted field reads through, and raises `frappe.PermissionError` otherwise (final-review fix T4). `owner` and `modified_by` (staff emails) are refused as fields, bare or behind a link.
 - **Existing templates:** none exist on the live site, so there's no data migration. Templates created before this change are blocked at send time with a clear "add parameter rows" error.
 - **Resolution** happens in WhatsApp Message `before_insert` for Outgoing messages with `use_template` set, `template` set and empty `template_parameters`:
   1. For each placeholder present in the template body (`{{n}}`), find its parameter row.

@@ -87,9 +87,10 @@ CRM sends templates with their `{{1}}`, `{{2}}`... placeholders. Each template n
 
 - On the **WhatsApp Templates** form, add one row per placeholder in **Parameters**: `Placeholder` (1, 2, ...), `Field`, optional `Default Value`.
 - `Field` is a fieldname on the reference doctype, or `link_field.target_field` for one level of link, e.g. `organization` or `lead.first_name` on a Deal.
-- Not allowed as sources: Password, Attach, Attach Image, Code, Signature, Geolocation, JSON, table and layout fields, and User fields other than `full_name`, `first_name`, `last_name`.
+- Not allowed as sources: Password, Attach, Attach Image, Code, Signature, Geolocation, JSON, table and layout fields, `owner` and `modified_by` (staff email addresses, also not through a link), and User fields other than `full_name`, `first_name`, `last_name`.
+- The sending user must be able to read the reference document, and any document a `link.field` reads through; otherwise the send is refused with a permission error.
 - Saving the template fails if a `{{n}}` has no row, numbering has gaps, or a field does not exist on the template's doctype.
-- A message with no reference document falls back to the CRM Lead / Deal matched by phone number.
+- A message with no reference document falls back to the CRM Contact, Lead or Deal matched by phone number.
 - The `Default Value` is used when the field is empty. If there is still no value, no row, or no reference document, **the send is blocked** with an error naming the placeholders (for example "needs {{2}} (organization) but CRM Lead LEAD-0001 has no value"). Nothing ever goes out with a literal `{{1}}`.
 
 ## 5. Link numbers
