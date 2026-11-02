@@ -1,3 +1,4 @@
+import time
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -6,7 +7,7 @@ from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, now_datetime
 
 from yourwhatsapp import hooks
-from yourwhatsapp.yourwhatsapp import tasks
+from yourwhatsapp.yourwhatsapp import relay_client, tasks
 from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings.whatsapp_settings import write_password
 
 RELAY = "http://relay.test"
@@ -23,9 +24,9 @@ def relay_status(status):
 
 
 class TestReconcileAccountStatus(IntegrationTestCase):
-	"""Runs in a rolled-back transaction; the relay is mocked. Accounts that are
-	not the test's own (the live ones on this site) get a connection error from
-	the mock, so the job leaves them, and their cache entries, alone."""
+	"""Runs in a rolled-back transaction; the relay is mocked. The job is limited
+	to the test's own accounts (names=), so the live ones and their cache
+	entries are never touched."""
 
 	def setUp(self):
 		settings = frappe.get_single("WhatsApp Settings")
@@ -64,12 +65,16 @@ class TestReconcileAccountStatus(IntegrationTestCase):
 		if isinstance(answer, int):  # an HTTP error status
 			response = relay_status("")
 			response.status_code, response.ok = answer, False
+			response.raise_for_status.side_effect = requests.exceptions.HTTPError(f"{answer} error")
 			return response
 		return relay_status(answer)
 
 	def _run(self):
 		with patch("requests.get", side_effect=self._get):
-			tasks.reconcile_account_status()
+			tasks.reconcile_account_status(names=[a.name for a in self.accounts])
+
+	def _down_since(self, account, seconds_ago):
+		frappe.cache.set_value(tasks.relay_down_key(account.name), time.time() - seconds_ago)
 
 	def _field(self, account, field="status"):
 		return frappe.db.get_value("WhatsApp Account", account.name, field)
@@ -88,20 +93,37 @@ class TestReconcileAccountStatus(IntegrationTestCase):
 		self.assertEqual(headers, {"x-api-key": RELAY_KEY})
 		self.assertEqual(timeout, 5)
 
-	def test_down_marks_disconnected_only_on_second_check(self):
+	def test_down_marks_disconnected_after_job_interval(self):
 		for status in ("disconnected", "not_started", "logged_out"):
 			with self.subTest(relay=status):
 				account = self._account(f"Reconcile Down {status}", status)
 				self._run()
-				self.assertEqual(self._field(account), "Active", "one check is not yet a job interval")
+				self.assertEqual(self._field(account), "Active", "first seen down just now")
+				self._run()
+				self.assertEqual(self._field(account), "Active", "a quick second check is not a job interval")
+				self._down_since(account, tasks.RECONCILE_MINUTES * 60 - 29)
 				self._run()
 				self.assertEqual(self._field(account), "Disconnected")
 
+	def test_down_less_than_interval_kept(self):
+		account = self._account("Reconcile Short", "disconnected")
+		self._down_since(account, tasks.RECONCILE_MINUTES * 60 - 31)
+		self._run()
+		self.assertEqual(self._field(account), "Active")
+
+	def test_first_seen_kept_across_checks(self):
+		account = self._account("Reconcile First Seen", "disconnected")
+		self._down_since(account, 100)
+		first = frappe.cache.get_value(tasks.relay_down_key(account.name))
+		self._run()
+		self.assertEqual(frappe.cache.get_value(tasks.relay_down_key(account.name)), first)
+
 	def test_recovery_between_checks_resets_down_time(self):
 		account = self._account("Reconcile Blip", "disconnected")
-		self._run()
+		self._down_since(account, 600)
 		self.relay[account.session_id] = "connected"
 		self._run()
+		self.assertIsNone(frappe.cache.get_value(tasks.relay_down_key(account.name)))
 		self.relay[account.session_id] = "disconnected"
 		self._run()
 		self.assertEqual(self._field(account), "Active")
@@ -138,13 +160,42 @@ class TestReconcileAccountStatus(IntegrationTestCase):
 		self.assertEqual(self._field(account), "Active")
 		self.assertEqual(self._field(account, "last_health_check"), before)
 
-	def test_one_failure_does_not_stop_others(self):
-		self._account("Reconcile Broken", requests.exceptions.ConnectionError("refused"))
-		bad_answer = self._account("Reconcile Bad Answer", "connected")
-		good = self._account("Reconcile After", "connected", status="Disconnected")
-		self.relay[bad_answer.session_id] = 401
+	def test_unreachable_relay_stops_the_run(self):
+		self._account("Reconcile Refused", requests.exceptions.ConnectionError("refused"))
+		later = self._account("Reconcile Not Asked", "connected", status="Disconnected")
 		self._run()
+		self.assertEqual(len(self.calls), 1, "relay down for all: no point asking for the rest")
+		self.assertEqual(self._field(later), "Disconnected")
+		self.assertIsNone(self._field(later, "last_health_check"))
+
+	def test_read_timeout_stops_the_run(self):
+		self._account("Reconcile Slow", requests.exceptions.ReadTimeout("slow"))
+		self._account("Reconcile Not Asked 2", "connected")
+		self._run()
+		self.assertEqual(len(self.calls), 1)
+
+	def test_one_failure_does_not_stop_others(self):
+		bad = self._account("Reconcile Bad Answer", 401)
+		good = self._account("Reconcile After", "connected", status="Disconnected")
+		with patch("frappe.log_error") as log_error:
+			self._run()
 		self.assertEqual(self._field(good), "Active")
+		self.assertEqual(self._field(bad), "Active")
+		self.assertIsNone(self._field(bad, "last_health_check"))
+		log_error.assert_called_once()
+		self.assertEqual(log_error.call_args.kwargs["reference_name"], bad.name)
+
+	def test_client_outdated_account_kept_disconnected(self):
+		account = self._account("Reconcile Outdated", "disconnected", status="Disconnected")
+		self._down_since(account, 3600)
+		self._run()
+		self.assertEqual(self._field(account), "Disconnected")
+
+	def test_session_status_helper(self):
+		with patch("requests.get", side_effect=self._get) as get:
+			self.relay["s-1"] = "connected"
+			self.assertEqual(relay_client.session_status("s-1"), "connected")
+		self.assertEqual(get.call_args.kwargs["timeout"], 5)
 
 	def test_not_configured_changes_nothing(self):
 		account = self._account("Reconcile Unconfigured", "connected", status="Disconnected")

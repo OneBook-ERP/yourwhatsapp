@@ -16,6 +16,7 @@ from yourwhatsapp.yourwhatsapp.templating import UnresolvedPlaceholders, render
 
 DISPATCH_BUDGET_SECONDS = 240
 TIMEOUT = 30  # the relay only queues the send, so a slow answer means trouble
+SESSION_STATUS_TIMEOUT = 5
 SEND_METHOD = "yourwhatsapp.yourwhatsapp.relay_client.send_message"
 # When no account could be reached at all (relay down or restarting), the
 # message is parked Queued and re-dispatched after these delays; then Failed.
@@ -34,6 +35,19 @@ def relay_settings():
 	if not settings.relay_base_url:
 		raise RelayNotConfigured("WhatsApp Settings: Relay Base URL is not configured")
 	return settings.relay_base_url.rstrip("/"), settings.get_password("relay_api_key")
+
+
+def session_status(session_id: str, timeout: float = SESSION_STATUS_TIMEOUT) -> str | None:
+	"""The relay's status for a session (connected, disconnected, ...). Raises
+	RelayNotConfigured, or requests' exceptions when the relay can't answer."""
+	base_url, api_key = relay_settings()
+	response = requests.get(
+		f"{base_url}/session/{session_id}/status",
+		headers={"x-api-key": api_key},
+		timeout=timeout,
+	)
+	response.raise_for_status()
+	return response.json().get("status")
 
 
 def _attach_payload(doc):

@@ -4,6 +4,7 @@ from frappe.utils import get_datetime, now_datetime
 
 from yourwhatsapp.yourwhatsapp.relay_client import RELAY_RESTARTED, increment_daily_count
 from yourwhatsapp.yourwhatsapp.routing import (
+	mark_disconnected,
 	mark_rate_limited,
 	repoint_default_accounts,
 	set_account_active,
@@ -211,6 +212,16 @@ def account_event(session_id: str, event: str, until: str | None = None):
 	if not account:
 		frappe.throw(f"No WhatsApp Account found for session {session_id}", frappe.DoesNotExistError)
 
+	if event == "client_outdated":
+		# Nothing on the account can fix this: the relay's whatsmeow must be upgraded.
+		mark_disconnected(account)
+		frappe.log_error(
+			title="WhatsApp client outdated",
+			message="WhatsApp rejected the relay's client as outdated; upgrade whatsmeow in the relay and restart it.",
+			reference_doctype="WhatsApp Account",
+			reference_name=account,
+		)
+		return {"ok": True}
 	if event != "temp_banned":
 		return {"ok": False, "reason": "unknown event"}
 

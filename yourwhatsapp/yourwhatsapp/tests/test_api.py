@@ -180,6 +180,20 @@ class TestRelayCallbacks(IntegrationTestCase):
 		self.assertEqual(row.status, "RateLimited")
 		self.assertIsNotNone(row.rate_limited_until)
 
+	def test_account_event_client_outdated(self):
+		with patch("frappe.log_error") as log_error:
+			result = api.account_event(self.account.session_id, "client_outdated")
+		self.assertEqual(result, {"ok": True})
+		self.assertEqual(frappe.db.get_value("WhatsApp Account", self.account.name, "status"), "Disconnected")
+		log_error.assert_called_once()
+		self.assertEqual(log_error.call_args.kwargs["title"], "WhatsApp client outdated")
+
+	def test_client_outdated_does_not_override_paused(self):
+		frappe.db.set_value("WhatsApp Account", self.account.name, "status", "Paused")
+		with patch("frappe.log_error"):
+			api.account_event(self.account.session_id, "client_outdated")
+		self.assertEqual(frappe.db.get_value("WhatsApp Account", self.account.name, "status"), "Paused")
+
 	def test_temp_banned_does_not_override_paused(self):
 		frappe.db.set_value("WhatsApp Account", self.account.name, "status", "Paused")
 		api.account_event(self.account.session_id, "temp_banned", until="2026-10-31T12:00:00Z")
