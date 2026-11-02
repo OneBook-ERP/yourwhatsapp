@@ -57,7 +57,7 @@ Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`. Compariso
 - [x] 🚫 (→ §0) Auto-restore every paired session on relay boot (from `.sessions/`) — today a relay restart leaves all accounts `Active` in Frappe but unable to send until manually reconnected.
 - [x] 🚫 (→ §0) `Connect` must work after a disconnect — `startSession` returns the stale map entry, `disconnected` never removes it.
 - [x] 🚫 (→ §0) Graceful SIGTERM handler: `client.destroy()` every session before exit. Repeated abrupt kills can get a device unlinked by WhatsApp (see CLAUDE.md gotchas).
-- [ ] Status reconciliation: scheduler job polls relay `/session/:id/status` and syncs `WhatsApp Account.status` + `last_health_check` (field exists, unused).
+- [x] Status reconciliation: `tasks.reconcile_account_status` (every 5 min) polls relay `/session/:id/status` and syncs `WhatsApp Account.status` (connected → Active; down on two checks in a row → Disconnected; never over Paused or a held ban) + `last_health_check`. Done 2026-11-02 with the relay's own reconnect loop (failed connects retried with backoff; Disconnected pushed after 60 s down) after the post-restart incident.
 - [x] (→ §0) UI buttons on `WhatsApp Account`: **Pause**, **Logout / Unlink**.
 
 ### C. Security
