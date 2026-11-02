@@ -222,7 +222,7 @@ def account_event(session_id: str, event: str, until: str | None = None):
 
 	if event == "client_outdated":
 		# Nothing on the account can fix this: the relay's whatsmeow must be upgraded.
-		mark_disconnected(account)
+		mark_disconnected(account, reason="client outdated")
 		frappe.log_error(
 			title="WhatsApp client outdated",
 			message="WhatsApp rejected the relay's client as outdated; upgrade whatsmeow in the relay and restart it.",
@@ -233,7 +233,7 @@ def account_event(session_id: str, event: str, until: str | None = None):
 	if event != "temp_banned":
 		return {"ok": False, "reason": "unknown event"}
 
-	mark_rate_limited(account, to_system_datetime(until) if until else None)
+	mark_rate_limited(account, to_system_datetime(until) if until else None, reason="temporary ban")
 	return {"ok": True}
 
 

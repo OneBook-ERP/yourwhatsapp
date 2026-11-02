@@ -4,6 +4,7 @@ from frappe import _
 from frappe.model.document import Document
 from frappe.utils import random_string
 
+from yourwhatsapp.yourwhatsapp import alerts
 from yourwhatsapp.yourwhatsapp.relay_client import relay_settings
 from yourwhatsapp.yourwhatsapp.routing import repoint_default_accounts, set_account_active
 
@@ -47,7 +48,9 @@ class WhatsAppAccount(Document):
 	def pause(self):
 		self._check_admin()
 		self._relay_post("pause")
+		old = frappe.db.get_value("WhatsApp Account", self.name, "status")
 		self.db_set("status", "Paused")
+		alerts.account_status_changed(self.name, old, "Paused", reason="manual")
 		repoint_default_accounts()
 
 	@frappe.whitelist()
@@ -63,7 +66,9 @@ class WhatsAppAccount(Document):
 	def logout(self):
 		self._check_admin()
 		self._relay_post("logout")
+		old = frappe.db.get_value("WhatsApp Account", self.name, "status")
 		self.db_set({"status": "Disconnected", "connected_at": None})
+		alerts.account_status_changed(self.name, old, "Disconnected", reason="manual")
 		repoint_default_accounts()
 
 	def _proxy_body(self):

@@ -5,6 +5,8 @@ from zoneinfo import ZoneInfo
 import frappe
 from frappe.utils import get_system_timezone, now_datetime
 
+from yourwhatsapp.yourwhatsapp import alerts
+
 
 def get_eligible_accounts(exclude=None):
 	filters = {"status": "Active"}
@@ -54,15 +56,18 @@ def pick_failover_account(failed_account):
 	return pick_account(exclude=[failed_account])
 
 
-def mark_rate_limited(account, until=None):
+def mark_rate_limited(account, until=None, reason=None) -> bool:
 	"""Flag an account RateLimited unless an admin has Paused it: Frappe owns admin intent."""
-	if frappe.db.get_value("WhatsApp Account", account, "status") == "Paused":
-		return
+	old = frappe.db.get_value("WhatsApp Account", account, "status")
+	if old == "Paused":
+		return False
 	values = {"status": "RateLimited"}
 	if until:
 		values["rate_limited_until"] = until
 	frappe.db.set_value("WhatsApp Account", account, values)
 	repoint_default_accounts()
+	alerts.account_status_changed(account, old, "RateLimited", reason)
+	return True
 
 
 def set_account_active(account, connected_at=True):
@@ -76,11 +81,13 @@ def set_account_active(account, connected_at=True):
 
 	if not relay_may_set_status(account, "Active"):
 		return False
+	old = frappe.db.get_value("WhatsApp Account", account, "status")
 	values = {"status": "Active", "rate_limited_until": None}
 	if connected_at:
 		values["connected_at"] = now_datetime()
 	frappe.db.set_value("WhatsApp Account", account, values)
 	fill_default_accounts(account)
+	alerts.account_status_changed(account, old, "Active", None)
 	return True
 
 
@@ -120,13 +127,17 @@ def _first_active_account(exclude=None):
 	return accounts[0].name if accounts else None
 
 
-def mark_disconnected(account):
+def mark_disconnected(account, reason=None) -> bool:
 	"""Record that the relay has no live session for the account, unless an admin Paused it."""
 	from yourwhatsapp.yourwhatsapp.api import relay_may_set_status
 
-	if relay_may_set_status(account, "Disconnected"):
-		frappe.db.set_value("WhatsApp Account", account, "status", "Disconnected")
-		repoint_default_accounts()
+	if not relay_may_set_status(account, "Disconnected"):
+		return False
+	old = frappe.db.get_value("WhatsApp Account", account, "status")
+	frappe.db.set_value("WhatsApp Account", account, "status", "Disconnected")
+	repoint_default_accounts()
+	alerts.account_status_changed(account, old, "Disconnected", reason)
+	return True
 
 
 def to_system_datetime(rfc3339: str) -> datetime:
