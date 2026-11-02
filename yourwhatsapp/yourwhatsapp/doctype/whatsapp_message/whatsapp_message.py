@@ -41,7 +41,10 @@ class WhatsAppMessage(Document):
 		"""The one exception to rotation: WhatsApp only applies a reaction sent
 		from the number whose chat holds the target, so it never fails over."""
 		self.message_type = "Manual"
-		target = reply_target(self.reply_to_message_id)
+		if not self.reply_to_message_id:
+			# CRM copies the target's message_id, which only a sent message has.
+			frappe.throw(_("The original message hasn't been sent yet"), frappe.ValidationError)
+		target = reply_target(self.reply_to_message_id, self.to)
 		account = target and target.whatsapp_account
 		if not account or frappe.db.get_value("WhatsApp Account", account, "status") != "Active":
 			frappe.throw(
@@ -100,14 +103,17 @@ class WhatsAppMessage(Document):
 			)
 
 
-def reply_target(message_id: str | None):
-	"""The WhatsApp Message a reply quotes or a reaction targets, by WhatsApp's message id."""
+def reply_target(message_id: str | None, customer: str | None):
+	"""The WhatsApp Message a reply quotes or a reaction targets, by WhatsApp's
+	message id. An id is only unique per chat, so the row in the chat with
+	`customer` wins, then the newest."""
 	if not message_id:
 		return None
-	return frappe.db.get_value(
+	rows = frappe.get_all(
 		"WhatsApp Message",
-		{"message_id": message_id},
-		["type", "message", "content_type", "attach", "whatsapp_account"],
-		as_dict=True,
+		filters={"message_id": message_id},
+		fields=["type", "from", "to", "message", "content_type", "attach", "whatsapp_account"],
 		order_by="creation desc",
 	)
+	in_chat = [r for r in rows if (r["from"] if r.type == "Incoming" else r.to) == customer]
+	return (in_chat or rows or [None])[0]

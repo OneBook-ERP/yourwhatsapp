@@ -79,11 +79,11 @@ def _attach_payload(doc):
 	}
 
 
-def _reply_payload(doc):
+def _reply_payload(doc, sending_account: str):
 	"""What the relay needs to quote (or react to) the target. A target Frappe
 	doesn't have sends a reply as a plain message; a reaction can't get here
 	without one (WhatsAppMessage refuses it at insert)."""
-	target = reply_target(doc.reply_to_message_id)
+	target = reply_target(doc.reply_to_message_id, doc.to)
 	if not target:
 		return {}
 	from_me = target.type == "Outgoing"
@@ -92,8 +92,9 @@ def _reply_payload(doc):
 		"reply_from_me": from_me,
 		"reply_text": _quoted_text(target),
 	}
-	if from_me:
-		# Rotation may reply from another number than the one that sent the quote.
+	if from_me and target.whatsapp_account != sending_account:
+		# Rotation replies from another number than the one that sent the
+		# quote. From the same one the relay uses its own JID (or LID).
 		phone = frappe.db.get_value("WhatsApp Account", target.whatsapp_account, "phone_number")
 		if normalize_number(phone):
 			payload["reply_participant"] = normalize_number(phone)
@@ -147,12 +148,20 @@ def handle_async_failure(message_name: str, error_code: str):
 		# there later instead of failing over (it may be the only number).
 		_retry_later(doc, f"Relay error: {error_code}")
 		return
+	if _is_reaction(doc):
+		return
 
 	_remember_attempt(doc, doc.whatsapp_account)
 	# message_status only applies a Failed callback while the message is Queued.
 	doc.db_set("status", "Queued")
 	if _switch_account(doc, f"Relay error: {error_code}", append=True):
 		_dispatch(doc)
+
+
+def _is_reaction(doc) -> bool:
+	# Only the target's number can send a reaction (WhatsAppMessage pins it):
+	# it is retried there or failed, never moved to another account.
+	return doc.content_type == "reaction"
 
 
 def increment_daily_count(account: str):
@@ -182,11 +191,7 @@ def _remember_attempt(doc, account: str):
 def _switch_account(doc, reason: str, relay_unavailable: bool = False, append: bool = False) -> bool:
 	"""Move the message to an account not yet tried. When none is left it is
 	parked for a later retry if the relay itself was unavailable, else Failed
-	with `reason` (appended to the relay's own reason when `append`). A
-	reaction is never moved: only its target's number can send it."""
-	if doc.content_type == "reaction":
-		_fail(doc, f"{doc.error_reason}; {reason}" if append and doc.error_reason else reason)
-		return False
+	with `reason` (appended to the relay's own reason when `append`)."""
 	next_account = pick_account(exclude=_attempted_accounts(doc), recipient=doc.to)
 	if next_account:
 		doc.db_set("whatsapp_account", next_account)
@@ -240,7 +245,7 @@ def _post(doc, account, base_url: str, api_key: str, message: str):
 		"message": message,
 		"local_message_id": doc.name,
 		**_attach_payload(doc),
-		**_reply_payload(doc),
+		**_reply_payload(doc, account.name),
 	}
 	for attempt in (1, 2):
 		try:
@@ -315,6 +320,9 @@ def _dispatch(doc):
 		try:
 			response = _post(doc, account, base_url, api_key, message)
 		except requests.exceptions.RequestException as e:
+			if _is_reaction(doc):
+				_retry_later(doc, f"Relay unreachable: {e}")
+				return
 			previous_account = account.name
 			if not _switch_account(doc, f"Relay unreachable: {e}", relay_unavailable):
 				return
@@ -345,6 +353,9 @@ def _dispatch(doc):
 			mark_rate_limited(account.name, _ban_expiry(response))
 		if status == 409 and _session_down(response):
 			mark_disconnected(account.name)
+		if _is_reaction(doc):
+			_fail(doc, f"Relay error: {code or status}")
+			return
 		if status != 409:
 			relay_unavailable = False
 		previous_account = account.name

@@ -204,8 +204,9 @@ def _apply_failure(name: str, error_reason: str | None, error_code: str | None, 
 		)
 		if error_code == "temp_banned" and account:
 			mark_rate_limited(account)
-		if content_type == "reaction":
-			# Only the target's number can send it: no failover, no retry.
+		if content_type == "reaction" and error_code != RELAY_RESTARTED:
+			# Only the target's number can send it: no failover. A send the
+			# relay lost is still retried on that number.
 			return {"ok": True}
 		frappe.enqueue(FAILOVER_METHOD, message_name=name, error_code=error_code, enqueue_after_commit=True)
 	return {"ok": True}

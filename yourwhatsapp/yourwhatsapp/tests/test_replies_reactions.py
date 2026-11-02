@@ -1,6 +1,7 @@
 from unittest.mock import patch
 
 import frappe
+import requests
 
 from yourwhatsapp.yourwhatsapp import api, relay_client, routing
 from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings.whatsapp_settings import write_password
@@ -116,7 +117,8 @@ class TestRepliesReactions(LiveSafeTestCase):
 		self.assertEqual(body["reply_to_message_id"], "OUT-1")
 		self.assertIs(body["reply_from_me"], True)
 		self.assertEqual(body["reply_text"], "our price list")
-		self.assertEqual(body["reply_participant"], "15550001111")
+		# Same account: the relay picks our own JID (its LID in a LID chat).
+		self.assertNotIn("reply_participant", body)
 
 	def test_reply_media_target_placeholder(self):
 		self._incoming("IN-IMG", content_type="image", message="")
@@ -139,6 +141,26 @@ class TestRepliesReactions(LiveSafeTestCase):
 		self.assertEqual(body["session_id"], self.account_b.session_id)
 		self.assertEqual(body["reply_participant"], "15550001111")
 		self.assertEqual(body["reply_text"], "sent from A")
+
+	def test_reply_participant_reevaluated_on_failover(self):
+		self._sent_outgoing("OUT-FO", account=self.account_a, message="sent from A")
+		msg = self._reply("OUT-FO", account=self.account_a)
+		_, post = self._payload(msg, relay_response(409, {"error": "session_unavailable"}), relay_response(202))
+		first, second = (c.kwargs["json"] for c in post.call_args_list)
+		self.assertEqual(first["session_id"], self.account_a.session_id)
+		self.assertNotIn("reply_participant", first)
+		self.assertEqual(second["session_id"], self.account_b.session_id)
+		self.assertEqual(second["reply_participant"], "15550001111")
+
+	def test_reply_target_prefers_this_customer(self):
+		# The same WhatsApp id on rows of two chats: the one with this customer wins, though older.
+		self._incoming("SHARED", account=self.account_a, message="customer said")
+		self._sent_outgoing("SHARED", account=self.account_b, to="15559990000", message="other chat")
+		body, _ = self._payload(self._reply("SHARED", account=self.account_b))
+		self.assertIs(body["reply_from_me"], False)
+		self.assertEqual(body["reply_text"], "customer said")
+		reaction = self._reaction("SHARED")
+		self.assertEqual(reaction.whatsapp_account, self.account_a.name)
 
 	def test_reply_missing_target_plain(self):
 		msg = self._reply("NOT-IN-FRAPPE")
@@ -176,15 +198,67 @@ class TestRepliesReactions(LiveSafeTestCase):
 		with self.assertRaises(frappe.ValidationError):
 			self._reaction("NOT-IN-FRAPPE")
 
+	def test_reaction_to_unsent_message_refused(self):
+		# CRM copies the target's message_id, which an unsent row doesn't have yet.
+		with self.assertRaises(frappe.ValidationError) as ctx:
+			self._reaction(None)
+		self.assertIn("The original message hasn't been sent yet", str(ctx.exception))
+
+	def _retry_state(self, name):
+		return frappe.db.get_value(
+			"WhatsApp Message", name, ["status", "whatsapp_account", "relay_retry_count", "next_retry_at"], as_dict=True
+		)
+
+	def test_reaction_relay_unreachable_parks_on_same_account(self):
+		self._incoming("IN-U", account=self.account_a)
+		reaction = self._reaction("IN-U")
+		_, post = self._payload(reaction, requests.exceptions.ConnectionError())
+		self.assertEqual(post.call_count, 1)
+		row = self._retry_state(reaction.name)
+		self.assertEqual((row.status, row.whatsapp_account), ("Queued", self.account_a.name))
+		self.assertEqual(row.relay_retry_count, 1)
+		self.assertIsNotNone(row.next_retry_at)
+
+	def test_reaction_relay_restarted_parks_on_same_account(self):
+		self._incoming("IN-RS", account=self.account_a)
+		reaction = self._reaction("IN-RS")
+		self._payload(reaction)
+		frappe.enqueue.reset_mock()
+		api.message_status(status="Failed", local_message_id=reaction.name, error_code="relay_restarted")
+		jobs = [c for c in frappe.enqueue.call_args_list if c.args and c.args[0] == api.FAILOVER_METHOD]
+		self.assertEqual([c.kwargs["error_code"] for c in jobs], ["relay_restarted"])
+		with patch("requests.post") as post:
+			relay_client.handle_async_failure(reaction.name, "relay_restarted")
+		post.assert_not_called()
+		row = self._retry_state(reaction.name)
+		self.assertEqual((row.status, row.whatsapp_account), ("Queued", self.account_a.name))
+		self.assertEqual(row.relay_retry_count, 1)
+
+	def test_reaction_async_failure_handler_never_switches(self):
+		self._incoming("IN-H", account=self.account_a)
+		reaction = self._reaction("IN-H")
+		self._payload(reaction)
+		frappe.db.set_value("WhatsApp Message", reaction.name, "status", "Failed")
+		with patch("requests.post") as post:
+			relay_client.handle_async_failure(reaction.name, "send_failed")
+		post.assert_not_called()
+		row = self._row(reaction.name)
+		self.assertEqual((row.status, row.whatsapp_account), ("Failed", self.account_a.name))
+
 	def test_reaction_no_failover(self):
 		self._incoming("IN-F", account=self.account_a)
 
-		# Synchronous: a 409 fails the reaction instead of trying B.
-		sync = self._reaction("IN-F")
-		_, post = self._payload(sync, relay_response(409, {"error": "session_unavailable"}))
-		self.assertEqual(post.call_count, 1)
-		row = self._row(sync.name)
-		self.assertEqual((row.status, row.whatsapp_account), ("Failed", self.account_a.name))
+		# Synchronous: a 409 or 429 fails the reaction instead of trying B.
+		for response in (
+			relay_response(409, {"error": "session_unavailable"}),
+			relay_response(429, {"error": "temp_banned"}),
+		):
+			frappe.db.set_value("WhatsApp Account", self.account_a.name, "status", "Active")
+			sync = self._reaction("IN-F")
+			_, post = self._payload(sync, response)
+			self.assertEqual(post.call_count, 1)
+			row = self._row(sync.name)
+			self.assertEqual((row.status, row.whatsapp_account), ("Failed", self.account_a.name))
 
 		# Asynchronous: a send_failed callback fails it, with no failover job.
 		frappe.db.set_value("WhatsApp Account", self.account_a.name, "status", "Active")
