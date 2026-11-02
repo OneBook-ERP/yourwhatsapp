@@ -556,13 +556,15 @@ func (s *Session) deliver(job *sendJob) {
 	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
 
-	s.presence(ctx, job.to, types.ChatPresenceComposing)
-	s.queue.sleep(typingDelay(job.text))
-	if s.queue.isStopped() { // paused, logged out or shutting down mid-typing
-		s.finishFailed(job, CodeSessionUnavailable, "session stopped")
-		return
+	if !job.isReaction() {
+		s.presence(ctx, job.to, types.ChatPresenceComposing)
+		s.queue.sleep(typingDelay(job.text))
+		if s.queue.isStopped() { // paused, logged out or shutting down mid-typing
+			s.finishFailed(job, CodeSessionUnavailable, "session stopped")
+			return
+		}
+		s.presence(ctx, job.to, types.ChatPresencePaused)
 	}
-	s.presence(ctx, job.to, types.ChatPresencePaused)
 
 	msg, err := s.buildMessage(ctx, job)
 	if err != nil {
@@ -608,14 +610,27 @@ func (s *Session) presence(ctx context.Context, to types.JID, state types.ChatPr
 }
 
 func (s *Session) buildMessage(ctx context.Context, job *sendJob) (*waE2E.Message, error) {
+	if job.isReaction() {
+		return s.client.BuildReaction(job.to, s.targetAuthor(job), job.replyToID, job.text), nil
+	}
+	reply := convert.ReplyContext(job.replyToID, s.targetAuthor(job).String(), job.replyText)
 	if job.media == nil {
-		return convert.TextMessage(job.text), nil
+		return convert.WithReply(convert.TextMessage(job.text), reply), nil
 	}
 	up, err := s.client.Upload(ctx, job.media, convert.ContentToMediaType(job.contentType))
 	if err != nil {
 		return nil, err
 	}
-	return convert.BuildMediaMessage(job.contentType, job.text, job.mimetype, job.filename, up), nil
+	return convert.WithReply(convert.BuildMediaMessage(job.contentType, job.text, job.mimetype, job.filename, up), reply), nil
+}
+
+// targetAuthor is who wrote the quoted or reacted-to message (spec §8.3):
+// this session's own number for one of ours, else the customer the job goes to.
+func (s *Session) targetAuthor(job *sendJob) types.JID {
+	if job.replyFromMe {
+		return s.client.OwnJID().ToNonAD()
+	}
+	return job.to
 }
 
 func (s *Session) finishSent(job *sendJob, messageID string) {

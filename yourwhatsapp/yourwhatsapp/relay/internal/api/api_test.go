@@ -189,6 +189,19 @@ func TestSendAccepted202(t *testing.T) {
 	}
 }
 
+func TestSendDecodesReplyFields(t *testing.T) {
+	fm := &fakeManager{}
+	h, _ := newServer(t, fm)
+	body := `{"session_id":"a","to":"919876543210","content_type":"reaction","message":"","local_message_id":"L1",` +
+		`"reply_to_message_id":"WAID-9","reply_from_me":true,"reply_text":"quoted"}`
+	if rec := do(h, "POST", "/message/send", body, true); rec.Code != 202 {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	if r := fm.sendReq; r.ReplyToID != "WAID-9" || !r.ReplyFromMe || r.ReplyText != "quoted" || r.ContentType != "reaction" {
+		t.Fatalf("reply fields not passed through: %+v", r)
+	}
+}
+
 func TestSendDuplicateReturns200(t *testing.T) {
 	fm := &fakeManager{sendErr: &session.SendError{
 		Code: session.CodeDuplicate, HTTP: 200,

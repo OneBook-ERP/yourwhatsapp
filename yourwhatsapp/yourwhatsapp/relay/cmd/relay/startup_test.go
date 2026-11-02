@@ -124,3 +124,11 @@ func TestRestoreSessionsSkipsAfterShutdown(t *testing.T) {
 		t.Fatal("armed lost-send failover after shutdown began")
 	}
 }
+
+func TestStartupLogsMediaCap(t *testing.T) {
+	var buf strings.Builder
+	logStartupConfig(slog.New(slog.NewJSONHandler(&buf, nil)), config.Config{MediaMaxBytes: 1234})
+	if !strings.Contains(buf.String(), `"media_max_bytes":1234`) {
+		t.Fatalf("startup log = %s", buf.String())
+	}
+}

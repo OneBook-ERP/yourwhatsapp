@@ -293,3 +293,53 @@ func TestInboundLIDNilResolver(t *testing.T) {
 		t.Fatalf("ok=%v %+v", ok, p)
 	}
 }
+
+func TestReplyContextText(t *testing.T) {
+	ctx := ReplyContext("TARGET1", "919000000001@s.whatsapp.net", "original question")
+	if ctx.GetStanzaID() != "TARGET1" || ctx.GetParticipant() != "919000000001@s.whatsapp.net" ||
+		ctx.GetQuotedMessage().GetConversation() != "original question" {
+		t.Fatalf("context = %v", ctx)
+	}
+	m := WithReply(TextMessage("the answer"), ctx)
+	if m.Conversation != nil {
+		t.Fatalf("reply kept the plain conversation field: %v", m)
+	}
+	ext := m.GetExtendedTextMessage()
+	if ext.GetText() != "the answer" || ext.GetContextInfo() != ctx {
+		t.Fatalf("extended text = %v", ext)
+	}
+}
+
+func TestReplyContextMedia(t *testing.T) {
+	ctx := ReplyContext("TARGET1", "1@s.whatsapp.net", "[image]")
+	up := whatsmeow.UploadResponse{URL: "u", DirectPath: "/p"}
+	for _, ct := range []string{"image", "video", "audio", "document"} {
+		m := WithReply(BuildMediaMessage(ct, "cap", "x/y", "f.bin", up), ctx)
+		var got *waE2E.ContextInfo
+		switch ct {
+		case "image":
+			got = m.GetImageMessage().GetContextInfo()
+		case "video":
+			got = m.GetVideoMessage().GetContextInfo()
+		case "audio":
+			got = m.GetAudioMessage().GetContextInfo()
+		case "document":
+			got = m.GetDocumentMessage().GetContextInfo()
+		}
+		if got != ctx {
+			t.Errorf("%s: context = %v", ct, got)
+		}
+	}
+}
+
+func TestReplyContextIgnoresMissingFields(t *testing.T) {
+	if ctx := ReplyContext("", "1@s.whatsapp.net", "x"); ctx != nil {
+		t.Fatalf("no target id must mean no reply context, got %v", ctx)
+	}
+	if m := WithReply(TextMessage("plain"), nil); m.GetConversation() != "plain" || m.ExtendedTextMessage != nil {
+		t.Fatalf("nil context changed the message: %v", m)
+	}
+	if ctx := ReplyContext("T", "1@s.whatsapp.net", ""); ctx.GetStanzaID() != "T" || ctx.QuotedMessage != nil {
+		t.Fatalf("empty quoted text: %v", ctx)
+	}
+}

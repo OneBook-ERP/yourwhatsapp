@@ -63,6 +63,7 @@ func run(log *slog.Logger) error {
 		return fmt.Errorf("load relay identity: %w", err)
 	}
 	log.Info("relay identity", "mode", cs.Mode(), "version", version)
+	logStartupConfig(log, cfg)
 
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	workerDone := make(chan struct{})
@@ -112,6 +113,12 @@ func run(log *slog.Logger) error {
 	shutdown(log, srv, manager, cancelWorker, workerDone)
 	log.Info("shutdown complete")
 	return nil
+}
+
+// logStartupConfig logs the effective limits an operator may need to match
+// elsewhere (nginx client_max_body_size against MEDIA_MAX_BYTES).
+func logStartupConfig(log *slog.Logger, cfg config.Config) {
+	log.Info("relay config", "media_max_bytes", cfg.MediaMaxBytes)
 }
 
 // restorer is the part of *session.Manager that brings sessions back at boot.

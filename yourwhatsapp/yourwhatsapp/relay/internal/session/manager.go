@@ -42,10 +42,18 @@ var (
 	ErrShuttingDown   = errors.New("relay is shutting down")
 )
 
-// SendRequest is the body of POST /message/send.
+// ContentReaction is the content_type of a reaction: Message is the emoji
+// (empty removes the reaction) and ReplyToID is the message reacted to.
+const ContentReaction = "reaction"
+
+// SendRequest is the body of POST /message/send. ReplyToID, when set, makes
+// the message a quoted reply (or names a reaction's target); ReplyFromMe says
+// the quoted message was ours and ReplyText is the quote's text.
 type SendRequest struct {
 	SessionID, To, ContentType, Message, LocalID, AttachBase64, AttachMimetype, AttachFilename string
 	ToIsLID                                                                                    bool
+	ReplyToID, ReplyText                                                                       string
+	ReplyFromMe                                                                                bool
 }
 
 // SendError is a synchronous /message/send outcome other than 202. Code
@@ -449,6 +457,7 @@ func (m *Manager) Send(ctx context.Context, req SendRequest) *SendError {
 	job := &sendJob{
 		localID: req.LocalID, to: to, contentType: req.ContentType, text: req.Message,
 		media: media, mimetype: req.AttachMimetype, filename: req.AttachFilename,
+		replyToID: req.ReplyToID, replyFromMe: req.ReplyFromMe, replyText: req.ReplyText,
 	}
 	if media != nil {
 		if job.mimetype == "" {
@@ -478,6 +487,11 @@ func validateSend(req SendRequest) (media []byte, serr *SendError) {
 		return nil, bad("to is required")
 	case req.LocalID == "":
 		return nil, bad("local_message_id is required")
+	case req.ContentType == ContentReaction:
+		if req.ReplyToID == "" {
+			return nil, bad("reply_to_message_id is required for a reaction")
+		}
+		return nil, nil // an empty emoji removes the reaction; attachments are ignored
 	case req.Message == "" && req.AttachBase64 == "":
 		return nil, bad("message or attachment is required")
 	}

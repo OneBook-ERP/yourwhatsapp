@@ -13,13 +13,21 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waAdv"
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
 
 	"yourwhatsapp/relay/internal/config"
 	"yourwhatsapp/relay/internal/store"
 )
+
+// fakeReaction records one BuildReaction call.
+type fakeReaction struct {
+	chat, sender types.JID
+	id, emoji    string
+}
 
 type fakeSent struct {
 	to  types.JID
@@ -44,6 +52,7 @@ type fakeClient struct {
 	generated   int
 	sendIDs     []types.MessageID // the ID passed to every SendMessage call
 	sent        []fakeSent
+	reactions   []fakeReaction
 	presences   []types.ChatPresence
 	uploads     []whatsmeow.MediaType
 	download    []byte
@@ -174,6 +183,16 @@ func (f *fakeClient) SendMessage(_ context.Context, to types.JID, msg *waE2E.Mes
 		}
 	}
 	return whatsmeow.SendResponse{ID: id}, nil
+}
+
+func (f *fakeClient) BuildReaction(chat, sender types.JID, id types.MessageID, reaction string) *waE2E.Message {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reactions = append(f.reactions, fakeReaction{chat, sender, id, reaction})
+	return &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{
+		Key:  &waCommon.MessageKey{RemoteJID: proto.String(chat.String()), ID: proto.String(id)},
+		Text: proto.String(reaction),
+	}}
 }
 
 func (f *fakeClient) SendChatPresence(_ context.Context, _ types.JID, state types.ChatPresence, _ types.ChatPresenceMedia) error {

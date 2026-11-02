@@ -24,6 +24,7 @@ type WAClient interface {
 	Upload(ctx context.Context, plaintext []byte, mediaType whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
 	GenerateMessageID() types.MessageID
 	SendMessage(ctx context.Context, to types.JID, message *waE2E.Message, extra ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error)
+	BuildReaction(chat, sender types.JID, id types.MessageID, reaction string) *waE2E.Message
 	SendChatPresence(ctx context.Context, jid types.JID, state types.ChatPresence, media types.ChatPresenceMedia) error
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
 	SetProxyAddress(addr string, opts ...whatsmeow.SetProxyOptions) error

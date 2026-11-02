@@ -18,10 +18,17 @@ type sendJob struct {
 	media       []byte
 	mimetype    string
 	filename    string
+	replyToID   string
+	replyFromMe bool
+	replyText   string
 }
 
+// isReaction reports whether the job is a reaction, which skips the anti-ban
+// gap and the typing pause.
+func (j *sendJob) isReaction() bool { return j.contentType == ContentReaction }
+
 // sendQueue is an account's FIFO of accepted sends with a single worker that
-// spaces sends by a random anti-ban delay.
+// spaces sends by a random anti-ban delay (reactions go out without one).
 type sendQueue struct {
 	capacity           int
 	delayMin, delayMax time.Duration
@@ -115,7 +122,7 @@ func (q *sendQueue) run(deliver func(*sendJob)) {
 		if job == nil {
 			return
 		}
-		if !q.lastSend.IsZero() {
+		if !q.lastSend.IsZero() && !job.isReaction() {
 			if wait := q.nextDelay() - time.Since(q.lastSend); wait > 0 {
 				q.sleep(wait)
 			}
