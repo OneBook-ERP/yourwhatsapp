@@ -124,7 +124,7 @@ class TestDefaultAccounts(DefaultsTestCase):
 			self.account.name,
 			{"status": "RateLimited", "rate_limited_until": now_datetime() - timedelta(hours=1)},
 		)
-		tasks.recover_rate_limited_accounts()
+		tasks.recover_rate_limited_accounts(names=[self.account.name])
 
 	def test_patch_fills_when_empty(self):
 		fill_default_whatsapp_accounts.execute()
@@ -201,8 +201,9 @@ class TestDefaultsFollowActive(DefaultsTestCase):
 		self.assertEqual(self._defaults(), (self.account.name, self.account.name))
 
 	def test_no_active_account_left_keeps_defaults(self):
-		frappe.db.set_value("WhatsApp Account", {"name": ["!=", self.account.name]}, "status", "Disconnected")
-		routing.mark_disconnected(self.account.name)
+		# No other Active account (patched: the live ones are left untouched).
+		with patch.object(routing, "_first_active_account", return_value=None):
+			routing.mark_disconnected(self.account.name)
 		self.assertEqual(self._defaults(), (self.account.name, self.account.name))
 
 	def test_background_default_write_keeps_settings_modified(self):

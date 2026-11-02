@@ -28,15 +28,23 @@ class TestRelayClient(IntegrationTestCase):
 		settings.save(ignore_permissions=True)
 		write_password("relay_api_key", RELAY_KEY)
 
+		# Route only among this test's accounts, without touching the live ones.
+		self.test_accounts = set()
+		real_eligible = routing.get_eligible_accounts
 		for patcher in (
 			patch("frappe.enqueue"),
 			patch("frappe.get_request_header", return_value=RELAY_KEY),
+			patch.object(
+				routing,
+				"get_eligible_accounts",
+				side_effect=lambda exclude=None: [
+					a for a in real_eligible(exclude=exclude) if a.name in self.test_accounts
+				],
+			),
 		):
 			patcher.start()
 			self.addCleanup(patcher.stop)
 
-		# Start from a clean routing pool so only this test's accounts are eligible.
-		frappe.db.set_value("WhatsApp Account", {}, "status", "Disconnected")
 		self.account_a = self._make_account("Client Test A")
 		self.account_b = self._make_account("Client Test B")
 
@@ -44,6 +52,7 @@ class TestRelayClient(IntegrationTestCase):
 		frappe.db.rollback()
 
 	def _make_account(self, name, **fields):
+		self.test_accounts.add(name)
 		return frappe.get_doc(
 			{
 				"doctype": "WhatsApp Account",
@@ -250,13 +259,13 @@ class TestRelayClient(IntegrationTestCase):
 
 			# Not due yet: the retry job leaves it alone.
 			frappe.enqueue.reset_mock()
-			tasks.retry_relay_unavailable_messages()
+			tasks.retry_relay_unavailable_messages(names=[msg.name])
 			frappe.enqueue.assert_not_called()
 
 			# Once due, the job re-dispatches it exactly once.
 			frappe.db.set_value("WhatsApp Message", msg.name, "next_retry_at", add_to_date(now_datetime(), seconds=-1))
-			tasks.retry_relay_unavailable_messages()
-			tasks.retry_relay_unavailable_messages()
+			tasks.retry_relay_unavailable_messages(names=[msg.name])
+			tasks.retry_relay_unavailable_messages(names=[msg.name])
 			sends = [c for c in frappe.enqueue.call_args_list if c.args[0] == relay_client.SEND_METHOD]
 			self.assertEqual([c.kwargs["message_name"] for c in sends], [msg.name])
 			self.assertIsNone(self._retry_row(msg.name).next_retry_at)
@@ -374,14 +383,14 @@ class TestRelayClient(IntegrationTestCase):
 		future = add_to_date(now_datetime(), hours=1)
 		expired = self._make_account("Client Expired", status="RateLimited", rate_limited_until=past)
 		pending = self._make_account("Client Pending", status="RateLimited", rate_limited_until=future)
-		tasks.recover_rate_limited_accounts()
+		tasks.recover_rate_limited_accounts(names=[expired.name, pending.name])
 		self.assertEqual(self._account_value(expired, "status"), "Active")
 		self.assertIsNone(self._account_value(expired, "rate_limited_until"))
 		self.assertEqual(self._account_value(pending, "status"), "RateLimited")
 
 	def test_manual_rate_limited_not_recovered(self):
 		manual = self._make_account("Client Manual", status="RateLimited")
-		tasks.recover_rate_limited_accounts()
+		tasks.recover_rate_limited_accounts(names=[manual.name])
 		self.assertEqual(self._account_value(manual, "status"), "RateLimited")
 
 
