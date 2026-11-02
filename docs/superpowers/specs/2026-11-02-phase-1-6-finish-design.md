@@ -40,7 +40,10 @@ Tests run on the live site (user's choice), so the suite itself must never be ab
    - **How:** a Frappe **bell notification** (Notification Log) plus an **email**.
    - **Content:** account name and number, new status, reason (relay detail, ban expiry, or "client outdated — upgrade relay"), time, and a link to the account.
    - **Recovery:** when the account returns to Active, a "back online" bell + email.
+   - **Every status writer:** every write of `WhatsApp Account.status` (relay callbacks incl. `update_qr`, reconcile, admin Pause/Resume/Logout, form edits, send-time 409/429 handling) goes through the routing helpers (`routing.set_account_status` / `status_written`), so no path can skip the alert hook. The relay's `update_qr` Disconnected may carry a `reason` (client outdated, logged out, another client took over) that the alert shows.
    - **Dedupe:** alert only on a real transition, at most one alert per account per 15 min (Redis key), so flapping doesn't spam.
+   - **Pending down:** a down alert held back by the throttle is recorded as pending; `reconcile_account_status` (every 5 min) sends it once the throttle has expired if the account is still down (not Active, not Paused), so a flap that ends down is reported, and its later recovery too. Recovery or Pause drops it.
+   - **After commit:** alert Redis state (throttle, down_sent, pending, manual) is written only after the transaction commits; a rolled-back callback leaves none, and the relay's retry alerts.
    - **No email account configured:** bell only, plus one Error Log note per day.
    - A manual Pause or Logout by an admin does **not** alert.
 4. **RBAC audit (document only, no permission changes)**
@@ -140,6 +143,8 @@ Tests run on the live site (user's choice), so the suite itself must never be ab
 5. **Alert transitions:** one function, `alerts.account_status_changed(account, old, new, reason)`, is called from the routing helpers (`mark_disconnected`, `mark_rate_limited`, `set_account_active`) and the `client_outdated` handler. It fires only when `old != new` and one side is Active.
    - Manual Pause/Logout pass `reason="manual"` → no alert, and set a 5-minute Redis "manual" flag so a later relay Disconnected for that account doesn't alert either.
    - A RateLimited account returning to Active on ban expiry counts as "back online".
-   - Recipients: users with `enabled=1` and a Has Role row for System Manager or WhatsApp Admin, excluding Guest; Administrator is included only if it has an email.
+   - Recipients: users with `enabled=1` and a Has Role row for System Manager or WhatsApp Admin, excluding Guest; Administrator always gets the bell while enabled, and email only with a real address (not empty, not `@example.com`). An alert with no recipients logs once a day ("give a user System Manager or WhatsApp Admin").
+   - `client_outdated` alerts with reason "client outdated" even when the account is already Disconnected, unless a down alert was already sent for this outage.
+   - Every status writer goes through the routing helpers (see §2.3); a form edit of Status counts as manual.
 6. **Throttle:** a 15-minute throttle per account per alert kind (down / recovered). A recovery is sent only if a down alert was sent for that outage, and the throttle never blocks a recovery.
 7. **`_keep_stored_keys`:** add a test for a doc object saved twice, with a typed env-mode key on the second save.

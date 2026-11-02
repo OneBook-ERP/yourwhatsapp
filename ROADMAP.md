@@ -97,7 +97,7 @@ Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`. Compariso
 ### G. Ops / quality
 - [x] Tests: routing, `api.py` endpoints (auth, unknown ids, inbound media), `relay_client` failover. None exist today.
 - [x] (→ §0) Structured JSON logs from the relay to stdout (Docker log driver picks them up).
-- [x] Health alert: bell + email to System Manager / WhatsApp Admin when an account goes Disconnected, RateLimited or the client is outdated, plus a back-online notice (`alerts.py`, throttled, silent on manual Pause/Logout).
+- [x] Health alert: bell + email to System Manager / WhatsApp Admin (Administrator: bell, email only with a real address) when an account goes Disconnected (relay callback, unlinked device, missed callback caught by reconcile) or RateLimited, or the client is outdated, plus a back-online notice (`alerts.py`). Every status write goes through `routing.set_account_status`/`status_written`, so no path skips it. Throttled to one down alert per 15 min; a throttled one is sent by reconcile once the throttle ends if the account is still down. Alert state is recorded only after commit. Silent on manual Pause/Logout/form edits.
 
 ## Phase 2 — Trigger-Based Automated Messaging 🔲 Not started (next after Phase 1.6)
 
