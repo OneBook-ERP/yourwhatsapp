@@ -35,6 +35,15 @@ class AlertsTestCase(LiveSafeTestCase):
 		).insert(ignore_permissions=True)
 		return user.name
 
+	def _change(self, old, new, reason=None, account=None):
+		"""One status change in its own committed request."""
+		alerts.account_status_changed(account or self.account, old, new, reason)
+		self._commit()
+
+	def _commit(self):
+		# frappe.db.commit is mocked; alert state is written by its after-commit callbacks.
+		frappe.db.after_commit.run()
+
 	def _bells(self, account=None):
 		return frappe.get_all(
 			"Notification Log",
@@ -46,7 +55,7 @@ class AlertsTestCase(LiveSafeTestCase):
 		return [call.kwargs["subject"] for call in self.sendmail.call_args_list]
 
 	def test_down_alert_bell_and_email(self):
-		alerts.account_status_changed(self.account, "Active", "Disconnected")
+		self._change("Active", "Disconnected")
 		bells = [b for b in self._bells() if b.for_user == self.recipients]
 		self.assertEqual(len(bells), 1)
 		self.assertEqual(bells[0].type, "Alert")
@@ -99,61 +108,87 @@ class AlertsTestCase(LiveSafeTestCase):
 		self.assertIn("give a user System Manager or WhatsApp Admin", self.log_error_mock.call_args.kwargs["message"])
 
 	def test_flap_throttled(self):
-		alerts.account_status_changed(self.account, "Active", "Disconnected")
-		alerts.account_status_changed(self.account, "Disconnected", "Active")
+		self._change("Active", "Disconnected")
+		self._change("Disconnected", "Active")
 		self.sendmail.reset_mock()
 		before = len(self._bells())
-		alerts.account_status_changed(self.account, "Active", "Disconnected")
+		self._change("Active", "Disconnected")
 		self.sendmail.assert_not_called()
 		self.assertEqual(len(self._bells()), before)
 
-	def test_recovery_only_after_down(self):
+	def test_alert_state_written_only_after_commit(self):
+		alerts.account_status_changed(self.account, "Active", "Disconnected")
+		for kind in ("down", "down_sent"):
+			self.assertIsNone(frappe.cache.get_value(alerts.alert_key(self.account, kind)))
+		self._commit()
+		for kind in ("down", "down_sent"):
+			self.assertTrue(frappe.cache.get_value(alerts.alert_key(self.account, kind)))
+
+	def test_rolled_back_alert_is_sent_again_on_retry(self):
+		alerts.account_status_changed(self.account, "Active", "Disconnected")
+		frappe.db.rollback()  # the callback failed later in its request
+		self._commit()
+		self.recipients = self._make_user("alert-admin@example.test", "WhatsApp Admin")  # rolled back too
+		for kind in ("down", "down_sent"):
+			self.assertIsNone(frappe.cache.get_value(alerts.alert_key(self.account, kind)))
+		self.assertEqual(self._bells(), [])
+		self._change("Active", "Disconnected")  # the relay's outbox retries it
+		self.assertEqual(len([b for b in self._bells() if b.for_user == self.recipients]), 1)
+		self.assertEqual(self.sendmail.call_count, 2)
+
+	def test_recovery_clears_down_sent_only_after_commit(self):
+		self._change("Active", "Disconnected")
 		alerts.account_status_changed(self.account, "Disconnected", "Active")
+		frappe.db.rollback()
+		self.assertTrue(frappe.cache.get_value(alerts.alert_key(self.account, "down_sent")))
+
+	def test_recovery_only_after_down(self):
+		self._change("Disconnected", "Active")
 		self.sendmail.assert_not_called()
 		self.assertEqual(self._bells(), [])
 
 	def test_recovery_not_throttled(self):
-		alerts.account_status_changed(self.account, "Active", "Disconnected")
-		alerts.account_status_changed(self.account, "Disconnected", "Active")
+		self._change("Active", "Disconnected")
+		self._change("Disconnected", "Active")
 		self.assertEqual(len(self._emailed()), 2)
 		self.assertIn("back online", self._emailed()[1])
 		# a second recovery for the same outage is not sent
-		alerts.account_status_changed(self.account, "Disconnected", "Active")
+		self._change("Disconnected", "Active")
 		self.assertEqual(len(self._emailed()), 2)
 
 	def test_manual_pause_silent(self):
-		alerts.account_status_changed(self.account, "Active", "Paused", reason="manual")
+		self._change("Active", "Paused", reason="manual")
 		self.sendmail.assert_not_called()
 		self.assertEqual(self._bells(), [])
 		self.assertTrue(frappe.cache.get_value(alerts.alert_key(self.account, "manual")))
 
 	def test_logout_then_relay_disconnect_silent(self):
-		alerts.account_status_changed(self.account, "Active", "Disconnected", reason="manual")
-		alerts.account_status_changed(self.account, "Active", "Disconnected")
+		self._change("Active", "Disconnected", reason="manual")
+		self._change("Active", "Disconnected")
 		self.sendmail.assert_not_called()
 		self.assertEqual(self._bells(), [])
 
 	def test_rate_limit_expiry_is_recovery(self):
-		alerts.account_status_changed(self.account, "Active", "RateLimited")
+		self._change("Active", "RateLimited")
 		self.assertIn("RateLimited", self.sendmail.call_args.kwargs["message"])
-		alerts.account_status_changed(self.account, "RateLimited", "Active")
+		self._change("RateLimited", "Active")
 		self.assertIn("back online", self._emailed()[1])
 
 	def test_non_active_transitions_silent(self):
-		alerts.account_status_changed(self.account, "Disconnected", "RateLimited")
-		alerts.account_status_changed(self.account, "Active", "Active")
+		self._change("Disconnected", "RateLimited")
+		self._change("Active", "Active")
 		self.sendmail.assert_not_called()
 
 	def test_client_outdated_reason_in_alert(self):
-		alerts.account_status_changed(self.account, "Active", "Disconnected", reason="client outdated")
+		self._change("Active", "Disconnected", reason="client outdated")
 		self.assertIn("client outdated", self.sendmail.call_args.kwargs["message"])
 		self.assertIn("client outdated", [b for b in self._bells() if b.for_user == self.recipients][0].subject)
 
 	def test_no_email_account_bell_only(self):
 		self._patch("yourwhatsapp.yourwhatsapp.alerts.has_outgoing_email_account", return_value=False)
 		with patch("frappe.log_error") as log_error:
-			alerts.account_status_changed(self.account, "Active", "Disconnected")
-			alerts.account_status_changed(self.account, "Disconnected", "Active")
+			self._change("Active", "Disconnected")
+			self._change("Disconnected", "Active")
 		self.sendmail.assert_not_called()
 		self.assertEqual(len([b for b in self._bells() if b.for_user == self.recipients]), 2)
 		log_error.assert_called_once()
@@ -162,7 +197,7 @@ class AlertsTestCase(LiveSafeTestCase):
 	def test_recipient_without_email_gets_bell_only(self):
 		no_email = self._make_user("alert-noemail@example.test", "WhatsApp Admin")
 		with patch.object(alerts, "_stored_email", side_effect=lambda user: None if user == no_email else user):
-			alerts.account_status_changed(self.account, "Active", "Disconnected")
+			self._change("Active", "Disconnected")
 		self.assertIn(no_email, [b.for_user for b in self._bells()])
 		self.assertNotIn(no_email, self.sendmail.call_args.kwargs["recipients"])
 		self.assertIn(self.recipients, self.sendmail.call_args.kwargs["recipients"])
@@ -173,7 +208,7 @@ class AlertsTestCase(LiveSafeTestCase):
 
 	def test_down_sent_has_ttl(self):
 		with patch.object(frappe.cache, "set_value", wraps=frappe.cache.set_value) as set_value:
-			alerts.account_status_changed(self.account, "Active", "Disconnected")
+			self._change("Active", "Disconnected")
 		ttls = {c.args[0]: c.kwargs.get("expires_in_sec") for c in set_value.call_args_list}
 		self.assertEqual(ttls[alerts.alert_key(self.account, "down_sent")], alerts.DOWN_SENT_SECONDS)
 
@@ -181,7 +216,7 @@ class AlertsTestCase(LiveSafeTestCase):
 		with patch.object(alerts, "_send_down", side_effect=RuntimeError), patch(
 			"frappe.log_error", side_effect=RuntimeError
 		):
-			alerts.account_status_changed(self.account, "Active", "Disconnected")
+			self._change("Active", "Disconnected")
 
 	def _relay_account(self, status="Active"):
 		account = frappe.get_doc(
@@ -202,6 +237,7 @@ class AlertsTestCase(LiveSafeTestCase):
 	def test_client_outdated_after_update_qr_alerts_once_with_reason(self):
 		account = self._relay_account()
 		api.update_qr(account.session_id, status="Disconnected", reason="client outdated")
+		self._commit()
 		with patch("frappe.log_error"):
 			api.account_event(account.session_id, "client_outdated")
 		self.assertEqual(len(self._emailed()), 1)
@@ -212,6 +248,7 @@ class AlertsTestCase(LiveSafeTestCase):
 		account = self._relay_account(status="Disconnected")
 		with patch("frappe.log_error"):
 			api.account_event(account.session_id, "client_outdated")
+			self._commit()
 			api.account_event(account.session_id, "client_outdated")
 		self.assertEqual(len(self._emailed()), 1)
 		self.assertIn("client outdated", self._emailed()[0])
@@ -221,10 +258,10 @@ class AlertsTestCase(LiveSafeTestCase):
 			{"doctype": "WhatsApp Account", "account_name": "Alert Reuse", "phone_number": "15550009002",
 			 "status": "Active"}
 		).insert(ignore_permissions=True)
-		alerts.account_status_changed(account.name, "Active", "Disconnected")
+		self._change("Active", "Disconnected", account=account.name)
 		frappe.delete_doc("WhatsApp Account", account.name, force=True, ignore_permissions=True)
 		self.sendmail.reset_mock()
-		alerts.account_status_changed(account.name, "Disconnected", "Active")
+		self._change("Disconnected", "Active", account=account.name)
 		self.sendmail.assert_not_called()
 
 

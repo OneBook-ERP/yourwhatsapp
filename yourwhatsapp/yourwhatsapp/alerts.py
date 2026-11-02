@@ -37,7 +37,7 @@ def account_status_changed(account: str, old: str | None, new: str, reason: str 
 	relay Disconnected for 5 minutes. A down alert is throttled to one per 15
 	minutes; a recovery is sent only if a down alert was sent, and is never throttled."""
 	if reason == "manual":
-		frappe.cache.set_value(alert_key(account, "manual"), 1, expires_in_sec=MANUAL_SECONDS)
+		_set_after_commit(alert_key(account, "manual"), MANUAL_SECONDS)
 		return
 	if old == new or "Active" not in (old, new):
 		return
@@ -96,8 +96,8 @@ def _send_down(account: str, new: str, reason: str | None):
 		return
 	if frappe.cache.get_value(alert_key(account, "down")):
 		return
-	frappe.cache.set_value(alert_key(account, "down"), 1, expires_in_sec=DOWN_THROTTLE_SECONDS)
-	frappe.cache.set_value(alert_key(account, "down_sent"), 1, expires_in_sec=DOWN_SENT_SECONDS)
+	_set_after_commit(alert_key(account, "down"), DOWN_THROTTLE_SECONDS)
+	_set_after_commit(alert_key(account, "down_sent"), DOWN_SENT_SECONDS)
 	detail = f"{new} ({reason})" if reason else new
 	subject = _("WhatsApp number {0} is down: {1}").format(account, detail)
 	_notify(account, subject, _("Messages cannot be sent from this number until it is Active again."))
@@ -106,7 +106,7 @@ def _send_down(account: str, new: str, reason: str | None):
 def _send_recovery(account: str, old: str | None):
 	if not frappe.cache.get_value(alert_key(account, "down_sent")):
 		return
-	frappe.cache.delete_value(alert_key(account, "down_sent"))
+	_delete_after_commit(alert_key(account, "down_sent"))
 	subject = _("WhatsApp number {0} is back online").format(account)
 	_notify(account, subject, _("The number was {0} and is Active again.").format(old or _("down")))
 
@@ -175,3 +175,13 @@ def _safely(account: str, send, *args):
 			)
 		except Exception:
 			pass
+
+
+# Alert state follows the transaction that sent the alert: if it rolls back
+# (bell and email go with it), nothing is recorded and a retried callback alerts.
+def _set_after_commit(key: str, expires_in_sec: int):
+	frappe.db.after_commit.add(lambda: frappe.cache.set_value(key, 1, expires_in_sec=expires_in_sec))
+
+
+def _delete_after_commit(key: str):
+	frappe.db.after_commit.add(lambda: frappe.cache.delete_value(key))
