@@ -51,6 +51,37 @@ class TestLiveSafety(unittest.TestCase):
 		self.assertEqual(offenders, [])
 
 
+class TestSideEffectIsolation(LiveSafeTestCase):
+	"""Side effects a rollback can't undo are mocked for every module."""
+
+	def test_error_log_is_mocked(self):
+		# tabError Log is MyISAM: a real insert survives the rollback.
+		self.assertIs(frappe.log_error, self.log_error_mock)
+		self.assertIsInstance(frappe.log_error, MagicMock)
+
+	def test_realtime_is_mocked(self):
+		# CRM broadcasts WhatsApp Message rows to every open desk.
+		self.assertIs(frappe.publish_realtime, self.publish_realtime_mock)
+		self.assertIsInstance(frappe.publish_realtime, MagicMock)
+
+	def test_rollback_runs_when_setup_fails(self):
+		marker = f"live-safety-{frappe.generate_hash(length=8)}"
+
+		class FailingSetUp(LiveSafeTestCase):
+			def setUp(inner):
+				super().setUp()
+				frappe.get_doc({"doctype": "ToDo", "description": marker}).insert(ignore_permissions=True)
+				raise RuntimeError("setUp failed after a write")
+
+			def runTest(inner):
+				pass
+
+		result = unittest.TestResult()
+		FailingSetUp().run(result)
+		self.assertEqual(len(result.errors), 1)
+		self.assertFalse(frappe.db.exists("ToDo", {"description": marker}))
+
+
 class TestAlertIsolation(LiveSafeTestCase):
 	"""A module that does not opt in can neither deliver alerts nor touch a real alert key."""
 
