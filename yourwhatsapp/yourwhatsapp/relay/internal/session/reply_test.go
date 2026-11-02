@@ -1,6 +1,7 @@
 package session
 
 import (
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -188,5 +189,106 @@ func TestReactionSkipsDelay(t *testing.T) {
 	}
 	if n := fc.presenceCount(); n != 2 {
 		t.Fatalf("presences = %d, want 2 (text only)", n)
+	}
+}
+
+// The quote names the number that actually sent the quoted message when
+// Frappe knows it (rotation), even though another number replies.
+func TestReplyFromMeUsesReplyParticipant(t *testing.T) {
+	h := newHarness(t)
+	fc := connectedWithPeer(h)
+	req := SendRequest{SessionID: "A", To: "+919000000001", Message: "answer", LocalID: "m1",
+		ReplyToID: "OUT1", ReplyFromMe: true, ReplyText: "we said", ReplyParticipant: "+91 91111-11111"}
+	if serr := h.send(req); serr != nil {
+		t.Fatal(serr)
+	}
+	h.waitFor("send", func() bool { return fc.sentCount() == 1 })
+	if p := fc.lastSent().msg.GetExtendedTextMessage().GetContextInfo().GetParticipant(); p != "919111111111@s.whatsapp.net" {
+		t.Fatalf("participant = %q", p)
+	}
+}
+
+// A reaction to one of our messages always names this session: Frappe pins
+// reactions to the target's account.
+func TestReactionFromMeIgnoresReplyParticipant(t *testing.T) {
+	h := newHarness(t)
+	fc := connectedWithPeer(h)
+	sendReaction(t, h, SendRequest{To: "+919000000001", Message: "👍", ReplyToID: "OUT1", ReplyFromMe: true,
+		ReplyParticipant: "919111111111"})
+	if r := fc.onlyReaction(t); r.sender.String() != ownNonAD {
+		t.Fatalf("sender = %s, want %s", r.sender, ownNonAD)
+	}
+}
+
+// In a LID chat our own messages are authored by our LID, when known.
+func TestReplyFromMeInLIDChatUsesOwnLID(t *testing.T) {
+	h := newHarness(t)
+	h.setup = func(fc *fakeClient) { fc.ownLID = mustJID("555000111222333:5@lid") }
+	fc := h.connected("A", testJID)
+	req := SendRequest{SessionID: "A", To: "123456789012345", ToIsLID: true, Message: "answer", LocalID: "m1",
+		ReplyToID: "OUT1", ReplyFromMe: true, ReplyText: "we said"}
+	if serr := h.send(req); serr != nil {
+		t.Fatal(serr)
+	}
+	h.waitFor("send", func() bool { return fc.sentCount() == 1 })
+	if p := fc.lastSent().msg.GetExtendedTextMessage().GetContextInfo().GetParticipant(); p != "555000111222333@lid" {
+		t.Fatalf("participant = %q", p)
+	}
+}
+
+func TestReplyFromMeInLIDChatWithoutOwnLIDUsesPhone(t *testing.T) {
+	h := newHarness(t)
+	fc := h.connected("A", testJID)
+	req := SendRequest{SessionID: "A", To: "123456789012345", ToIsLID: true, Message: "answer", LocalID: "m1",
+		ReplyToID: "OUT1", ReplyFromMe: true, ReplyText: "we said"}
+	if serr := h.send(req); serr != nil {
+		t.Fatal(serr)
+	}
+	h.waitFor("send", func() bool { return fc.sentCount() == 1 })
+	if p := fc.lastSent().msg.GetExtendedTextMessage().GetContextInfo().GetParticipant(); p != ownNonAD {
+		t.Fatalf("participant = %q", p)
+	}
+}
+
+func TestReactionValidation(t *testing.T) {
+	h := newHarness(t)
+	connectedWithPeer(h)
+	for name, req := range map[string]SendRequest{
+		"emoji too long": {Message: strings.Repeat("👍", 17)},
+		"attachment":     {Message: "👍", AttachBase64: "iVBORw0KGgo="},
+	} {
+		req.SessionID, req.To, req.ContentType, req.LocalID, req.ReplyToID = "A", "+919000000001", "reaction", "r-"+name, "IN1"
+		if serr := h.send(req); serr == nil || serr.Code != CodeBadRequest {
+			t.Errorf("%s: got %v, want bad_request", name, serr)
+		}
+	}
+	ok := SendRequest{SessionID: "A", To: "+919000000001", ContentType: "reaction", LocalID: "r-ok", ReplyToID: "IN1",
+		Message: strings.Repeat("👍", 16)}
+	if serr := h.send(ok); serr != nil {
+		t.Fatalf("16-rune emoji rejected: %v", serr)
+	}
+}
+
+// A reaction still counts as a send: a text right behind it waits the gap.
+func TestTextAfterReactionWaitsGap(t *testing.T) {
+	h := newHarness(t)
+	var mu sync.Mutex
+	var slept []time.Duration
+	h.m.sleep = func(d time.Duration) { mu.Lock(); slept = append(slept, d); mu.Unlock() }
+	h.m.cfg.SendDelayMin, h.m.cfg.SendDelayMax = 4*time.Second, 4*time.Second
+	connectedWithPeer(h)
+
+	if serr := h.send(SendRequest{SessionID: "A", To: "+919000000001", ContentType: "reaction",
+		Message: "👍", LocalID: "r1", ReplyToID: "IN1"}); serr != nil {
+		t.Fatal(serr)
+	}
+	if serr := h.send(SendRequest{SessionID: "A", To: "+919000000001", Message: "hi", LocalID: "m1"}); serr != nil {
+		t.Fatal(serr)
+	}
+	h.waitFor("both sent", func() bool { return len(h.callbacks(outbox.MethodStatus)) == 2 })
+	mu.Lock()
+	defer mu.Unlock()
+	if len(slept) != 2 || slept[0] <= 3*time.Second || slept[0] > 4*time.Second || slept[1] != time.Second {
+		t.Fatalf("sleeps = %v, want [~4s gap, 1s typing]", slept)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	wastore "go.mau.fi/whatsmeow/store"
@@ -31,6 +32,9 @@ const (
 )
 
 const (
+	// maxReactionRunes bounds a reaction's emoji; ZWJ sequences and skin
+	// tones make one emoji several runes.
+	maxReactionRunes     = 16
 	defaultQueueCapacity = 50
 	inFlightWait         = 10 * time.Second
 )
@@ -54,6 +58,9 @@ type SendRequest struct {
 	ToIsLID                                                                                    bool
 	ReplyToID, ReplyText                                                                       string
 	ReplyFromMe                                                                                bool
+	// ReplyParticipant is the number (digits) that sent a from-me quoted
+	// message, which may be another of our numbers; empty means this session.
+	ReplyParticipant string
 }
 
 // SendError is a synchronous /message/send outcome other than 202. Code
@@ -458,6 +465,7 @@ func (m *Manager) Send(ctx context.Context, req SendRequest) *SendError {
 		localID: req.LocalID, to: to, contentType: req.ContentType, text: req.Message,
 		media: media, mimetype: req.AttachMimetype, filename: req.AttachFilename,
 		replyToID: req.ReplyToID, replyFromMe: req.ReplyFromMe, replyText: req.ReplyText,
+		replyParticipant: onlyDigits(req.ReplyParticipant),
 	}
 	if media != nil {
 		if job.mimetype == "" {
@@ -488,10 +496,15 @@ func validateSend(req SendRequest) (media []byte, serr *SendError) {
 	case req.LocalID == "":
 		return nil, bad("local_message_id is required")
 	case req.ContentType == ContentReaction:
-		if req.ReplyToID == "" {
+		switch {
+		case req.ReplyToID == "":
 			return nil, bad("reply_to_message_id is required for a reaction")
+		case utf8.RuneCountInString(req.Message) > maxReactionRunes:
+			return nil, bad("reaction must be a single emoji")
+		case req.AttachBase64 != "":
+			return nil, bad("a reaction cannot carry an attachment")
 		}
-		return nil, nil // an empty emoji removes the reaction; attachments are ignored
+		return nil, nil // an empty emoji removes the reaction
 	case req.Message == "" && req.AttachBase64 == "":
 		return nil, bad("message or attachment is required")
 	}

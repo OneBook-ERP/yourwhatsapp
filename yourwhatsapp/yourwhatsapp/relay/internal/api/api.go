@@ -316,18 +316,19 @@ func (h *handler) logout(w http.ResponseWriter, r *http.Request) {
 }
 
 type sendBody struct {
-	SessionID      string `json:"session_id"`
-	To             string `json:"to"`
-	ContentType    string `json:"content_type"`
-	Message        string `json:"message"`
-	LocalID        string `json:"local_message_id"`
-	AttachBase64   string `json:"attach_base64"`
-	AttachMimetype string `json:"attach_mimetype"`
-	AttachFilename string `json:"attach_filename"`
-	ToIsLID        bool   `json:"to_is_lid"`
-	ReplyToID      string `json:"reply_to_message_id"`
-	ReplyFromMe    bool   `json:"reply_from_me"`
-	ReplyText      string `json:"reply_text"`
+	SessionID        string `json:"session_id"`
+	To               string `json:"to"`
+	ContentType      string `json:"content_type"`
+	Message          string `json:"message"`
+	LocalID          string `json:"local_message_id"`
+	AttachBase64     string `json:"attach_base64"`
+	AttachMimetype   string `json:"attach_mimetype"`
+	AttachFilename   string `json:"attach_filename"`
+	ToIsLID          bool   `json:"to_is_lid"`
+	ReplyToID        string `json:"reply_to_message_id"`
+	ReplyFromMe      bool   `json:"reply_from_me"`
+	ReplyText        string `json:"reply_text"`
+	ReplyParticipant string `json:"reply_participant"`
 }
 
 func (h *handler) send(w http.ResponseWriter, r *http.Request) {
@@ -344,6 +345,7 @@ func (h *handler) send(w http.ResponseWriter, r *http.Request) {
 		LocalID: b.LocalID, AttachBase64: b.AttachBase64, AttachMimetype: b.AttachMimetype,
 		AttachFilename: b.AttachFilename, ToIsLID: b.ToIsLID,
 		ReplyToID: b.ReplyToID, ReplyFromMe: b.ReplyFromMe, ReplyText: b.ReplyText,
+		ReplyParticipant: b.ReplyParticipant,
 	})
 	switch {
 	case serr == nil:

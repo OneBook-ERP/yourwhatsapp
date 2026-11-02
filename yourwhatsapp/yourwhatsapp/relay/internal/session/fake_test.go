@@ -39,6 +39,7 @@ type fakeSent struct {
 type fakeClient struct {
 	mu          sync.Mutex
 	own         types.JID
+	ownLID      types.JID
 	connected   bool
 	handlers    []whatsmeow.EventHandler
 	qr          chan whatsmeow.QRChannelItem
@@ -227,6 +228,12 @@ func (f *fakeClient) OwnJID() types.JID {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.own
+}
+
+func (f *fakeClient) OwnLID() types.JID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ownLID
 }
 
 // emit delivers an event to every handler synchronously.

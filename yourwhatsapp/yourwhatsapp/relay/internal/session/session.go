@@ -613,7 +613,7 @@ func (s *Session) buildMessage(ctx context.Context, job *sendJob) (*waE2E.Messag
 	if job.isReaction() {
 		return s.client.BuildReaction(job.to, s.targetAuthor(job), job.replyToID, job.text), nil
 	}
-	reply := convert.ReplyContext(job.replyToID, s.targetAuthor(job).String(), job.replyText)
+	reply := convert.ReplyContext(job.replyToID, s.quoteParticipant(job).String(), job.replyText)
 	if job.media == nil {
 		return convert.WithReply(convert.TextMessage(job.text), reply), nil
 	}
@@ -624,13 +624,35 @@ func (s *Session) buildMessage(ctx context.Context, job *sendJob) (*waE2E.Messag
 	return convert.WithReply(convert.BuildMediaMessage(job.contentType, job.text, job.mimetype, job.filename, up), reply), nil
 }
 
-// targetAuthor is who wrote the quoted or reacted-to message (spec §8.3):
-// this session's own number for one of ours, else the customer the job goes to.
+// targetAuthor is who wrote the reacted-to message (spec §8.3): this session
+// for one of ours (Frappe pins a reaction to the target's account), else the
+// customer the job goes to.
 func (s *Session) targetAuthor(job *sendJob) types.JID {
 	if job.replyFromMe {
-		return s.client.OwnJID().ToNonAD()
+		return s.ownJIDFor(job.to)
 	}
 	return job.to
+}
+
+// quoteParticipant is who wrote the quoted message: for one of ours, the
+// number Frappe says sent it (rotation may reply from another), else as
+// targetAuthor.
+func (s *Session) quoteParticipant(job *sendJob) types.JID {
+	if job.replyFromMe && job.replyParticipant != "" {
+		return types.NewJID(job.replyParticipant, types.DefaultUserServer)
+	}
+	return s.targetAuthor(job)
+}
+
+// ownJIDFor is this session's identity in chat: its LID in a LID chat when
+// known, else its phone JID.
+func (s *Session) ownJIDFor(chat types.JID) types.JID {
+	if chat.Server == types.HiddenUserServer {
+		if lid := s.client.OwnLID(); !lid.IsEmpty() {
+			return lid.ToNonAD()
+		}
+	}
+	return s.client.OwnJID().ToNonAD()
 }
 
 func (s *Session) finishSent(job *sendJob, messageID string) {

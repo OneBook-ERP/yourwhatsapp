@@ -21,6 +21,8 @@ type sendJob struct {
 	replyToID   string
 	replyFromMe bool
 	replyText   string
+	// replyParticipant: digits of the number that sent a from-me quoted message.
+	replyParticipant string
 }
 
 // isReaction reports whether the job is a reaction, which skips the anti-ban

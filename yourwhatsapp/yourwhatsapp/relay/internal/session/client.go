@@ -30,6 +30,8 @@ type WAClient interface {
 	SetProxyAddress(addr string, opts ...whatsmeow.SetProxyOptions) error
 	AddEventHandler(handler whatsmeow.EventHandler) uint32
 	OwnJID() types.JID
+	// OwnLID is the account's own LID, or EmptyJID when not yet known.
+	OwnLID() types.JID
 }
 
 // ClientFactory builds a client for a device loaded from (or new to) the store.
@@ -53,3 +55,5 @@ func (c *whatsmeowClient) OwnJID() types.JID {
 	}
 	return types.EmptyJID
 }
+
+func (c *whatsmeowClient) OwnLID() types.JID { return c.Store.GetLID() }
