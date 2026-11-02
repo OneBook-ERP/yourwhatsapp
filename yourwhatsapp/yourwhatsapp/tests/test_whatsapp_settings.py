@@ -716,6 +716,103 @@ class TestWhatsAppSettingsRelay(IntegrationTestCase):
 		self.assertEqual(timeouts, [ws.AUTO_TEST_TIMEOUT, ws.TIMEOUT])
 		self.assertEqual(ws.AUTO_TEST_TIMEOUT, 5)
 
+	# A form save never touches the stored keys
+
+	def test_stale_form_save_keeps_pending_key(self):
+		self._set_keys(current=OLD_KEY)
+		stale = self._settings()  # opened before the key change below
+		pending = "p" * 43
+		self._set_keys(current=OLD_KEY, pending=pending)
+		stale.relay_pending_key = ""
+		stale.routing_strategy = "Priority"
+
+		stale.save()
+
+		self.assertEqual(self._keys(), (OLD_KEY, pending))
+		self.assertEqual(self._auth_fields(), {"relay_api_key", "relay_pending_key"})
+
+	def test_form_save_with_empty_or_mask_never_deletes_current_key(self):
+		self._set_keys(current=OLD_KEY)
+		for value in ("", None, "*****", "•" * 8):
+			with self.subTest(value=value):
+				settings = self._settings()
+				settings.relay_api_key = value
+				settings.save()
+				self.assertEqual(self._keys(), (OLD_KEY, None))
+
+	def test_whatsapp_admin_saves_stale_form_after_key_change(self):
+		self._make_whatsapp_admin()
+		self._set_keys(current=OLD_KEY)
+		frappe.set_user(ROLE_USER)
+		stale = self._settings()
+		new_key = "n" * 43  # a different length, so a different mask
+		self._set_keys(current=new_key)
+		stale.routing_strategy = "Priority"
+
+		stale.save()  # must not raise PermissionError
+
+		frappe.set_user("Administrator")
+		self.assertEqual(self._keys(), (new_key, None))
+		self.assertEqual(self._settings().routing_strategy, "Priority")
+
+	def test_password_masks_compare_equal(self):
+		self._make_whatsapp_admin()
+		self._set_keys(current=OLD_KEY)
+		frappe.set_user(ROLE_USER)
+		settings = self._settings()
+		settings.relay_api_key = "•" * 5
+		settings.relay_pending_key = "***"
+		settings.save()
+		frappe.set_user("Administrator")
+		self.assertEqual(self._keys(), (OLD_KEY, None))
+
+	def _auth_fields(self):
+		rows = frappe.db.sql("SELECT fieldname FROM `__Auth` WHERE doctype=%s", ("WhatsApp Settings",))
+		return {row[0] for row in rows} & {"relay_api_key", "relay_pending_key"}
+
+	# adopt_pending_key (the send path's answer to a 401)
+
+	def test_adopt_pending_key_promotes_and_commits(self):
+		pending = "a" * 43
+		self._set_keys(current=OLD_KEY, pending=pending)
+		self._use(FakeRelay(mode="claimed", current=pending))
+		self.commit.reset_mock()
+
+		self.assertEqual(ws.adopt_pending_key(), pending)
+
+		self.assertEqual(self._keys(), (pending, None))
+		self.assertTrue(self.commit.called)
+
+	def test_adopt_pending_key_skips_when_lock_held(self):
+		pending = "a" * 43
+		self._set_keys(current=OLD_KEY, pending=pending)
+		self._use(FakeRelay(mode="claimed", current=pending))
+		other = self._second_connection()
+		other.sql("SELECT GET_LOCK(%s, 0)", (ws.key_lock_name(),))
+		try:
+			with patch.object(ws, "KEY_LOCK_TIMEOUT", 0):
+				self.assertIsNone(ws.adopt_pending_key())
+		finally:
+			other.sql("SELECT RELEASE_LOCK(%s)", (ws.key_lock_name(),))
+			other.close()
+		self.assertEqual(self._keys(), (OLD_KEY, pending))
+
+	def test_adopt_pending_key_skips_when_pending_changed(self):
+		probed, newer = "a" * 43, "b" * 43
+		self._set_keys(current=OLD_KEY, pending=probed)
+		relay = FakeRelay(mode="claimed", current=probed)
+
+		def info_then_new_pending(headers, body):
+			# Another request replaces the pending key while we probe.
+			ws.write_password("relay_pending_key", newer)
+			return relay._info(headers.get("x-api-key"))
+
+		relay.fail[("GET", "/info")] = info_then_new_pending
+		self._use(relay)
+
+		self.assertIsNone(ws.adopt_pending_key())
+		self.assertEqual(self._keys(), (OLD_KEY, newer))
+
 	def test_key_never_in_error_message(self):
 		pending = "q" * 43
 

@@ -59,7 +59,10 @@ function add_relay_buttons(frm, info) {
 			__("Replay Dead Callbacks"),
 			() =>
 				frappe.confirm(
-					__("Send the {0} callbacks the relay gave up on to this site again?", [info.outbox.dead]),
+					__(
+						"Send the {0} callbacks the relay gave up on to this site again? Old status updates and failed-send notices may arrive late; a failed send may be retried on another number.",
+						[info.outbox.dead]
+					),
 					() => run(frm, "replay_dead_callbacks")
 				),
 			group

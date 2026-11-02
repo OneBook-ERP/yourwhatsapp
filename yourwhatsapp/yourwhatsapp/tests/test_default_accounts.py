@@ -76,7 +76,10 @@ class TestDefaultAccounts(DefaultsTestCase):
 		other = self._make_account("Default Test B", "15550001002")
 		self._set_defaults(other.name, other.name)
 		routing.set_account_active(self.account.name)
-		self.assertEqual(self._defaults(), (other.name, other.name))
+		# Repointed at an Active account (which one depends on the site's priorities).
+		for default in self._defaults():
+			self.assertNotEqual(default, "missing-account")
+			self.assertEqual(self._status(frappe._dict(name=default)), "Active")
 
 	def test_dangling_default_replaced(self):
 		self._set_defaults("No Such Account", "No Such Account")
@@ -151,6 +154,22 @@ class TestDefaultAccounts(DefaultsTestCase):
 			patch.object(frappe, "get_cached_value", return_value="Round Robin"),
 		):
 			self.assertEqual(routing.pick_account(), second.name)
+
+
+class TestFillDefaultsReadsFresh(DefaultsTestCase):
+	def test_second_call_in_one_transaction_reads_fresh_defaults(self):
+		other = self._make_account("Default Test B", "15550001002")
+		self._set_defaults(other.name, other.name)
+		routing.fill_default_accounts()  # reads (and could cache) B
+		# Changed behind fill_default_accounts' back, as another write in this transaction would.
+		self._set_defaults("missing-account", "missing-account")
+
+		routing.fill_default_accounts()
+
+		# Repointed at an Active account (which one depends on the site's priorities).
+		for default in self._defaults():
+			self.assertNotEqual(default, "missing-account")
+			self.assertEqual(self._status(frappe._dict(name=default)), "Active")
 
 
 class TestDefaultsFollowActive(DefaultsTestCase):

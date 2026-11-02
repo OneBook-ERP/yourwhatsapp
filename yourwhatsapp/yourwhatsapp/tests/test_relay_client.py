@@ -32,6 +32,8 @@ class TestRelayClient(IntegrationTestCase):
 		self.test_accounts = set()
 		real_eligible = routing.get_eligible_accounts
 		for patcher in (
+			# adopt_pending_key commits its promotion; in tests that must not reach the live site.
+			patch.object(frappe.db, "commit"),
 			patch("frappe.enqueue"),
 			patch("frappe.get_request_header", return_value=RELAY_KEY),
 			patch.object(

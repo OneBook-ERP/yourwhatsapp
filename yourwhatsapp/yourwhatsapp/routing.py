@@ -93,7 +93,8 @@ def fill_default_accounts(account=None, exclude=None):
 	priority. With no Active account left the defaults stay as they are.
 	Sending never reads them; CRM needs the outgoing one Active to show WhatsApp."""
 	for fieldname in DEFAULT_FIELDS:
-		current = frappe.db.get_single_value("WhatsApp Settings", fieldname)
+		# Uncached: an earlier write in this transaction bypasses the value cache.
+		current = frappe.db.get_single_value("WhatsApp Settings", fieldname, cache=False)
 		if current and current != exclude and _is_active(current):
 			continue
 		replacement = account if account and account != exclude and _is_active(account) else None

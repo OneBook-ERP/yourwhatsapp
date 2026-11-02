@@ -6,7 +6,12 @@ import requests
 from frappe import _
 from frappe.model.document import Document
 from frappe.utils import cint
-from frappe.utils.password import remove_encrypted_password, set_encrypted_password
+from frappe.utils.password import (
+	decrypt,
+	get_decrypted_password,
+	remove_encrypted_password,
+	set_encrypted_password,
+)
 
 DOCTYPE = "WhatsApp Settings"
 TIMEOUT = 15
@@ -42,6 +47,11 @@ CALLBACK_UNREACHABLE = (
 ACCEPTED, REJECTED, UNKNOWN = "accepted", "rejected", "unknown"
 # Who can reach the relay, and with which key: only a System Manager changes these.
 RELAY_CONNECTION_FIELDS = ("relay_base_url", "relay_api_key", "relay_pending_key", "relay_bootstrap_token")
+PASSWORD_FIELDS = ("relay_api_key", "relay_pending_key", "relay_bootstrap_token")
+# Written only by the controller (write_password); a form save never deletes or replaces
+# them with a mask. relay_api_key may still be typed in for an env-mode relay.
+STORED_KEYS = ("relay_api_key", "relay_pending_key")
+MASK_CHARS = frozenset("*\u2022")
 RELAY_FIELDS_FORBIDDEN = "Only a System Manager can change the relay connection settings ({0})."
 TYPED_KEY_NOT_ENV = (
 	"Relay API Key can only be typed in for a relay that takes its key from RELAY_API_KEY "
@@ -65,21 +75,37 @@ class WhatsAppSettings(Document):
 	def validate(self):
 		# Controller methods store keys with write_password, which skips this.
 		changed = self._changed_relay_fields()
-		if not changed:
-			return
-		if "System Manager" not in frappe.get_roles():
+		if changed and "System Manager" not in frappe.get_roles():
 			labels = ", ".join(_(self.meta.get_label(fieldname)) for fieldname in changed)
 			frappe.throw(_(RELAY_FIELDS_FORBIDDEN).format(labels), frappe.PermissionError)
 		if "relay_api_key" in changed:
 			self._require_env_mode_relay()
+		self._keep_stored_keys(changed)
 
 	def _changed_relay_fields(self):
 		before = self.get_doc_before_save()
 		return [
 			fieldname
 			for fieldname in RELAY_CONNECTION_FIELDS
-			if (self.get(fieldname) or "") != ((before.get(fieldname) if before else None) or "")
+			if _differs(fieldname, self.get(fieldname), before.get(fieldname) if before else None)
 		]
+
+	def _keep_stored_keys(self, changed):
+		"""Stop Frappe's _save_passwords from deleting or overwriting a stored key.
+
+		A stale form carries an empty or outdated value for keys the controller
+		wrote since it was loaded. Only a typed relay_api_key (env mode, checked
+		above) goes through; the pending key never changes from a form."""
+		if self.flags.ignore_save_passwords is True:
+			return
+		ignored = list(self.flags.ignore_save_passwords or [])
+		for fieldname in STORED_KEYS:
+			if fieldname == "relay_api_key" and fieldname in changed:
+				continue
+			stored = get_decrypted_password(DOCTYPE, DOCTYPE, fieldname, raise_exception=False)
+			self.set(fieldname, "*" * len(stored) if stored else None)
+			ignored.append(fieldname)
+		self.flags.ignore_save_passwords = ignored
 
 	def _require_env_mode_relay(self):
 		"""A hand-typed key is only right for an env-mode relay; elsewhere it would lock this site out."""
@@ -290,12 +316,19 @@ class WhatsAppSettings(Document):
 
 def adopt_pending_key():
 	"""The relay refused this site's key: if it takes the pending key (a claim
-	or rotation whose 200 was lost), make that the current key and return it."""
+	or rotation whose 200 was lost), make that the current key and return it.
+
+	Promotes under the key-change lock, and only if the pending key is still
+	the one probed; commits at once so the send's HTTP calls hold no row lock."""
 	settings = frappe.get_single(DOCTYPE)
 	pending = settings.get_password("relay_pending_key", raise_exception=False)
 	if not pending or settings._accepts(pending) != ACCEPTED:
 		return None
-	settings._promote_pending(pending)
+	with _try_key_change_lock() as acquired:
+		if not acquired or _locked_pending_key() != pending:
+			return None
+		settings._promote_pending(pending)
+		frappe.db.commit()
 	return pending
 
 
@@ -319,13 +352,33 @@ def key_lock_name():
 
 @contextmanager
 def _key_change_lock():
-	acquired = frappe.db.sql("SELECT GET_LOCK(%s, %s)", (key_lock_name(), KEY_LOCK_TIMEOUT))[0][0]
-	if acquired != 1:
-		frappe.throw(_(KEY_CHANGE_BUSY))
-	try:
+	with _try_key_change_lock() as acquired:
+		if not acquired:
+			frappe.throw(_(KEY_CHANGE_BUSY))
 		yield
+
+
+@contextmanager
+def _try_key_change_lock():
+	"""Yield whether the key-change lock was taken; release it afterwards."""
+	acquired = frappe.db.sql("SELECT GET_LOCK(%s, %s)", (key_lock_name(), KEY_LOCK_TIMEOUT))[0][0] == 1
+	try:
+		yield acquired
 	finally:
-		frappe.db.sql("SELECT RELEASE_LOCK(%s)", (key_lock_name(),))
+		if acquired:
+			frappe.db.sql("SELECT RELEASE_LOCK(%s)", (key_lock_name(),))
+
+
+def _locked_pending_key():
+	# A locking read: the latest committed pending key, not this transaction's snapshot.
+	row = frappe.db.sql(
+		"SELECT password FROM `__Auth` WHERE doctype=%s AND name=%s AND fieldname=%s AND encrypted=1 "
+		"FOR UPDATE",
+		(DOCTYPE, DOCTYPE, "relay_pending_key"),
+	)
+	if not row or not row[0][0]:
+		return None
+	return decrypt(row[0][0], key=f"{DOCTYPE}.{DOCTYPE}.relay_pending_key")
 
 
 def _pending_key_committed():
@@ -337,6 +390,20 @@ def _pending_key_committed():
 			(DOCTYPE, DOCTYPE, "relay_pending_key"),
 		)
 	)
+
+
+def _differs(fieldname, new, old):
+	new, old = new or "", old or ""
+	if fieldname in PASSWORD_FIELDS:
+		if _is_mask(new) and _is_mask(old):
+			return False  # masks of any length or style stand for the stored value
+		if fieldname in STORED_KEYS and (not new or _is_mask(new)):
+			return False  # kept as stored by _keep_stored_keys
+	return new != old
+
+
+def _is_mask(value):
+	return bool(value) and set(value) <= MASK_CHARS
 
 
 def _ok(response):
