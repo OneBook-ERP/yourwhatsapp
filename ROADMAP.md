@@ -36,12 +36,12 @@ Each phase lists an objective, detailed tasks, and status. Update statuses as wo
 
 **Objective:** Make the existing send/receive system safe and operable in production. Production runs in Docker with no shell access for us (no `bench`/`docker exec`), so everything after the initial compose deploy must be configurable from the Desk UI by a System Manager. 🚫 = must fix before go-live; the rest should land before real volume.
 
-### 0. Relay engine migration: whatsapp-web.js → whatsmeow (Go) 🔄 (decided 2026-10-31; built, live on dev bench since 2026-10-31 — only Node deletion left)
+### 0. Relay engine migration: whatsapp-web.js → whatsmeow (Go) ✅ (decided and cut over 2026-10-31; Node relay deleted 2026-11-02)
 Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`. Comparison scored whatsmeow 4.20, Baileys 3.95, Evolution API 3.20 (rejected: v2.4+ requires licensing-server activation), whatsapp-web.js 2.70. No headless browser means the Chromium-specific items below (tini for browser children, `CHROMIUM_PATH`, orphan cleanup, user-agent) are dropped, and several 🚫 items are delivered by the new relay itself (marked "→ §0").
 - [x] 🚫 Go relay with the same HTTP contract: QR + phone-number pairing, SQLite session store, auto-restore on boot, graceful SIGTERM, persistent callback outbox, idempotent send, per-account send queue with jittered delay + typing, optional per-account proxy, `TemporaryBan` → `RateLimited`.
 - [x] 🚫 Frappe side: error-code-aware failover, monotonic status, inbound dedupe, `is_lid_sender`, `account_event`, account form buttons (Pair with code, Pause/Resume, Logout), `RateLimited` auto-recovery job.
 - [x] Live-test fixes (2026-10-31): template `status`/`for_doctype` so CRM's picker lists templates; outgoing `to` and inbound `from` stored digits only, so a customer's thread links to the same Lead/Deal whichever number carried it; routing and failover never pick the account whose own number is the recipient; media messages need an attachment; a relay 409 "session not running / logged out" marks the account Disconnected; Connect / Pair on an already-paired number sets Active instead of erroring (buttons hidden while Active); sends lost in a relay restart (`relay_restarted`) retry on the same account; orphan public QR images deleted. **No sticky sender**: every outgoing message, replies included, rotates (client requirement, see CLAUDE.md).
-- [ ] Relink every number once; verify against real numbers; delete the Node relay.
+- [x] Relink every number once; verify against real numbers; delete the Node relay (2026-11-02: restart restored 2/2 sessions, template send verified live).
 
 ### A. Docker deployment + UI-only setup
 - [x] 🚫 Relay Docker image (`relay/Dockerfile`): static Go binary, non-root, `/data` volume (→ §0; was Node + Chromium + tini).
@@ -113,7 +113,7 @@ Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`. Compariso
 
 **Objective:** The spec's named "Sender Health and Protection Controls" requirement. No unofficial-client setup is ban-proof — this is risk reduction, and it's what keeps numbers alive long enough to be useful. Never document or market this phase's output as ban-proof (spec's explicit compliance requirement).
 
-- [ ] Fix the hardcoded default `whatsapp-web.js` user-agent (`Chrome/101.0.4951.67`, identical across every deployment of the library worldwide, outdated for 2026) — set a distinct, current, realistic UA per account.
+- [x] ~~Fix the hardcoded default `whatsapp-web.js` user-agent~~ — moot since the whatsmeow migration (no browser) (`Chrome/101.0.4951.67`, identical across every deployment of the library worldwide, outdated for 2026) — set a distinct, current, realistic UA per account.
 - [ ] IP diversity per number — all accounts currently share one relay host/IP, a known farm-detection signal. Evaluate per-number egress IP (residential/mobile proxy) for production scale; check current host IP class (datacenter vs residential).
 - [ ] Reduce headless/puppeteer fingerprint distinctiveness — review/minimize unnecessary `--disable-*` launch args.
 - [ ] Number provisioning policy: real SIM-registered numbers only (not VOIP), gradual volume warm-up over 1-2 weeks per new number. Operational policy, not just code.

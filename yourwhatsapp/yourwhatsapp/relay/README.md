@@ -4,8 +4,6 @@ Self-hosted WhatsApp sending/receiving layer for the Frappe bench, written in Go
 
 Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`. Production setup: `DEPLOYMENT.md`.
 
-The legacy Node/whatsapp-web.js files (`server.js`, `session_manager.js`, `frappe_client.js`, `package*.json`) in this directory are kept only until cutover and are deleted afterwards. Ignore them for the Go relay.
-
 ## Build and run
 
 Go is installed at `$HOME/.local/go/bin` on the dev container and is not on `PATH`.
