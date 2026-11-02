@@ -55,7 +55,7 @@ New table `relay_config` (single row): `api_key` (plaintext, see Key storage), `
     - No sessions are restored.
 - **Key storage (decided):** plaintext only, in `relay_config.api_key`, compared in constant time. The outbox poster needs the plaintext anyway, and `relay.db` is already a credential. The `api_key_hash` column is dropped from the schema above.
 - **Rotation grace:** after `/claim/rotate` the relay accepts **both** old and new key for incoming requests for 10 minutes; callbacks switch to the new key immediately. `/claim/callback` and `/claim/rotate` answer 409 in env mode. Both require the **current** key only: the grace key is refused (401), so a leaked old key can't redirect callbacks or rotate again. One exception: `/claim/rotate` called with the grace key and a `api_key` equal to the current key is a 200 no-op, so Frappe can safely retry a rotation whose 200 it lost.
-- **`RELAY_BOOTSTRAP_TOKEN`** (optional env). When set, `/claim` requires `bootstrap_token` to match it (constant-time compare). DEPLOYMENT.md recommends setting it in production.
+- **`RELAY_BOOTSTRAP_TOKEN`** (optional env). When set, `/claim` requires `bootstrap_token` to match it (constant-time compare). DEPLOYMENT.md marks it required in production.
 
 ### 6.2 Routes
 | Route | Auth | Body → Response |
@@ -68,7 +68,7 @@ New table `relay_config` (single row): `api_key` (plaintext, see Key storage), `
 - **Callback check (final-review fix I3):** `POST /claim` and `PUT /claim/callback`, once otherwise valid (mode, bootstrap token, key length, URL, `site_name`), POST `<callback_url>/api/method/yourwhatsapp.yourwhatsapp.api.ping` with the candidate key (the claim's `api_key`; for a callback change the current key) and `Host: <site_name>`, 10 s timeout. Non-2xx or no answer → 400 `{"error":"callback_unreachable","detail":<"http <status>" or an error class>}`; nothing is stored. `api.ping` is a guest POST that runs `_verify_relay_key` (current or pending key) and returns `{"ok": true}`. Env mode is unaffected (409 before any probe). A new callback target also applies to callbacks already queued.
 - **`site_name`** (fix minor 8): non-empty, at most 253 chars, only `A-Z a-z 0-9 . - :`; else 400 `bad_request`. The claim routes cap their body at 64 KB (413).
 - **`POST /outbox/dead/replay`** (authenticated, grace key allowed): moves every `outbox_dead` row back to the outbox tail in original id order, attempts reset, and wakes the worker; returns `{"replayed": n}`. WhatsApp Settings shows **Relay → Replay Dead Callbacks** (System Manager, `replay_dead_callbacks`) when `/info` reports `outbox.dead > 0`.
-- **Version:** a build-time `-ldflags "-X main.version=..."` from `git describe`, defaulting to `dev`.
+- **Version:** a build-time `-ldflags "-X main.version=..."` from `git describe` (`make build`; Docker: `--build-arg VERSION=<tag>`), defaulting to `dev`.
 - **Claiming at runtime:** after a successful `/claim`, the relay restores sessions (there are none on a fresh volume), starts the outbox worker, and starts serving. No restart is needed.
 
 ### 6.3 Frappe side
@@ -84,7 +84,7 @@ New table `relay_config` (single row): `api_key` (plaintext, see Key storage), `
   - Starting a key change holds a MariaDB named lock (`GET_LOCK`) from the pending check through the commit, so the claim UI requires MariaDB.
 - **Env mode (decided):** Connect Relay first calls `GET /info`. If `mode` is `env`, it explains that this relay's key comes from `RELAY_API_KEY` and must be typed into the field by hand (the field stays editable for that case only).
 - **Buttons (System Manager only):**
-  - **Connect Relay:** generate the key with `secrets.token_urlsafe(32)`, then POST `/claim` with key, callback URL, `frappe.local.site` and the bootstrap token. On 200, save the key. On 409 `already_claimed`, show "This relay is already claimed. If it's yours, use Rotate Key with the current key, or reset the relay's volume."
+  - **Connect Relay:** generate the key with `secrets.token_urlsafe(32)`, then POST `/claim` with key, callback URL, `frappe.local.site` and the bootstrap token. On 200, save the key. On 409 `already_claimed`, show "This relay is already claimed. If this site holds its key, Test Connection shows Connected and there is nothing to connect. Otherwise only resetting the relay's volume frees it, and every number must then be relinked."
   - **Rotate Key:** generate a new key, POST `/claim/rotate` authenticated with the old one, and save the new key only after a 200.
   - **Update Callback URL:** PUT `/claim/callback`.
   - **Test Connection:** GET `/info` with the key and render the panel. Shows "unreachable" on connection error, "key rejected" on 401, "unclaimed" if the relay isn't claimed.

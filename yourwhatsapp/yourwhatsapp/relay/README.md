@@ -28,7 +28,7 @@ RELAY_API_KEY=<key> FRAPPE_BASE_URL=http://127.0.0.1:8001 RELAY_PORT=8800 \
 | Variable | Default | Purpose |
 |---|---|---|
 | `RELAY_API_KEY` | empty | Optional. When set, the relay is in **env mode**: the key comes from env and must equal `WhatsApp Settings.relay_api_key`. When empty, the relay uses its stored claim or waits to be claimed. A stored claim is ignored while it is set (the relay logs a warning at startup). |
-| `RELAY_BOOTSTRAP_TOKEN` | empty | Optional but recommended for unclaimed production relays: `POST /claim` must carry it as `bootstrap_token`. Use `python3 -c "import secrets;print(secrets.token_urlsafe(32))"`; `/claim` is not throttled. |
+| `RELAY_BOOTSTRAP_TOKEN` | empty | Required in production (optional on a dev bench): `POST /claim` must carry it as `bootstrap_token`. Use `python3 -c "import secrets;print(secrets.token_urlsafe(32))"`; `/claim` is not throttled. |
 | `FRAPPE_BASE_URL` | `http://127.0.0.1:8001` | Callback base URL, **env mode only** (a claimed relay uses the callback URL from its claim). Use `127.0.0.1`, since `.localhost` names do not resolve from the relay process. |
 | `FRAPPE_SITE_NAME` | empty | Env mode only: sent as the `Host` header on callbacks (e.g. `crm.example.com`). A claimed relay uses the claim's `site_name`. |
 | `RELAY_HOST` | `127.0.0.1` | Listen address. `0.0.0.0` in Docker. |
@@ -68,7 +68,7 @@ Every route except `/health`, `POST /claim` and `GET /info` needs the `x-api-key
 | `POST /session/:id/logout` | Unlink the device from WhatsApp, delete its keys and clear the pause. |
 | `POST /message/send` | `local_message_id` required. Asynchronous: **202** `{"state":"queued"}`; the result arrives later as a `message_status` callback. Errors: 400 `bad_request`, 422 `invalid_number`, 409 `session_unavailable`, 429 `temp_banned`; 200 `duplicate` for an already queued or sent id. Asynchronous failures carry `send_failed`, `session_unavailable`, `temp_banned`, `relay_restarted` (a restart lost the queued send; Frappe retries it on the same account), or `send_unconfirmed` (the send errored after the message went out, so it may have been delivered; it carries `message_id` and is not failed over). |
 
-`version` is stamped at build time (`make build` uses `git describe`; `-ldflags "-X main.version=..."`) and is `dev` otherwise, including in the stock Dockerfile build.
+`version` is stamped at build time (`make build` uses `git describe`; `-ldflags "-X main.version=..."`) and is `dev` otherwise. The Dockerfile takes it as a build arg: `docker build --build-arg VERSION=<tag> ...` (default `dev`).
 
 Status values: `not_started`, `qr_pending`, `pairing`, `connecting`, `connected`, `disconnected`, `logged_out`, `paused`, `temp_banned`.
 

@@ -10,7 +10,7 @@ services:
     stop_grace_period: 30s
     environment:
       # The relay boots unclaimed and is claimed from WhatsApp Settings -> Connect Relay.
-      # Recommended: a bootstrap token, so only someone holding it can claim the relay.
+      # Required in production: a bootstrap token, so only someone holding it can claim the relay.
       # Generate: python3 -c "import secrets;print(secrets.token_urlsafe(32))"
       RELAY_BOOTSTRAP_TOKEN: ${RELAY_BOOTSTRAP_TOKEN:-}
       RELAY_HOST: 0.0.0.0

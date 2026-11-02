@@ -14,8 +14,9 @@ TIMEOUT = 15
 AUTO_TEST_TIMEOUT = 5
 KEY_LOCK_TIMEOUT = 10  # seconds to wait for another key change to commit its pending key
 ALREADY_CLAIMED = (
-	"This relay is already claimed. If it's yours, use Rotate Key with the current key, "
-	"or reset the relay's volume."
+	"This relay is already claimed. If this site holds its key, Test Connection shows Connected "
+	"and there is nothing to connect. Otherwise only resetting the relay's volume frees it, "
+	"and every number must then be relinked."
 )
 ENV_MODE = (
 	"This relay takes its key from its RELAY_API_KEY environment variable. "

@@ -26,26 +26,26 @@ Then `bench --site <site> install-app yourwhatsapp` (frappe_docker: `docker comp
 
 ```bash
 cd apps/yourwhatsapp/yourwhatsapp/yourwhatsapp/relay
-docker build -t ghcr.io/<org>/yourwhatsapp-relay:<version> .
-docker push ghcr.io/<org>/yourwhatsapp-relay:<version>
+docker build --build-arg VERSION=<tag> -t ghcr.io/<org>/yourwhatsapp-relay:<tag> .
+docker push ghcr.io/<org>/yourwhatsapp-relay:<tag>
 ```
 
-The image is a static Go binary on `gcr.io/distroless/static:nonroot`, listening on 8800, with its data in `/data`. Pin a version tag rather than `latest`.
+The image is a static Go binary on `gcr.io/distroless/static:nonroot`, listening on 8800, with its data in `/data`. `VERSION` (e.g. `$(git describe --tags --always)`) is what the Relay Status panel shows; without it the relay reports `dev`. Pin a version tag rather than `latest`.
 
 ## 3. Add the compose override
 
 Copy `yourwhatsapp/yourwhatsapp/relay/compose.whatsapp.yaml` next to your frappe_docker compose files, set the image name (or uncomment `build:`), and add it to the stack:
 
 ```bash
-export SITE_NAME=crm.example.com
-# Recommended: only someone holding this token can claim the relay in step 4.
+# Required in production: only someone holding this token can claim the relay in step 4.
 # Keep it, you need it in step 4. /claim is not throttled, so use a long random value.
 export RELAY_BOOTSTRAP_TOKEN=$(python3 -c "import secrets;print(secrets.token_urlsafe(32))")
 docker compose -f compose.yaml -f overrides/compose.mariadb.yaml -f overrides/compose.redis.yaml \
   -f compose.whatsapp.yaml up -d
 ```
 
-- No `RELAY_API_KEY` is needed: the relay starts **unclaimed** and is claimed from the Desk in step 4. The callback URL and `Host` header come from the claim. `FRAPPE_BASE_URL` / `FRAPPE_SITE_NAME` are optional fallbacks for env mode, and setting `RELAY_API_KEY` (commented out in the compose file as legacy/env mode) pins the key in env and disables claiming.
+- `RELAY_BOOTSTRAP_TOKEN` is **required in production**. Without it, whoever reaches the relay port first can claim a fresh relay.
+- No `RELAY_API_KEY` is needed: the relay starts **unclaimed** and is claimed from the Desk in step 4. The callback URL and `Host` header come from the claim. `FRAPPE_BASE_URL` / `FRAPPE_SITE_NAME` are used in env mode only (for that, also `export SITE_NAME=<your site>` before `up`), and setting `RELAY_API_KEY` (commented out in the compose file as legacy/env mode) pins the key in env and disables claiming.
 - A relay whose volume already holds linked numbers but has no claim (for example after moving from env mode) refuses to start unless `RELAY_BOOTSTRAP_TOKEN` or `RELAY_API_KEY` is set. This stops anyone who can reach the port from claiming live numbers.
 - No ports are published. Only containers on the compose network (your Frappe services) reach the relay. Never expose port 8800 to the internet: with the key, anyone can send messages as your numbers.
 - `stop_grace_period: 30s` lets the relay close WhatsApp sessions cleanly. Do not shorten it, and avoid `docker kill` on a live relay: repeated abrupt disconnects can get a device unlinked.
@@ -60,7 +60,9 @@ The claim UI needs a MariaDB site (it serialises key changes with `GET_LOCK`). I
 1. **Relay Base URL**: `http://whatsapp-relay:8800`.
 2. **Callback URL**: Frappe as the relay sees it, e.g. `http://frontend:8080` (empty falls back to the site's own URL, which is rarely reachable from inside Docker). The relay sends inbound messages and status updates here, with the site name as `Host`.
 3. **Relay Bootstrap Token**: the `RELAY_BOOTSTRAP_TOKEN` value, if you set one.
-4. Save, then **Relay, Connect Relay**. Frappe generates a random key, stores it in `relay_api_key` and claims the relay. You never see or type the key.
+4. Save, then **Relay, Connect Relay**. Frappe generates a random key, stores it in `relay_api_key` and claims the relay. You never see or type the key. Before accepting the claim, the relay calls this site back at the Callback URL (with the new key and the site name as `Host`); if that fails, Connect Relay says the Callback URL is unreachable and nothing is claimed: fix the Callback URL, save, and try again.
+
+Only a System Manager can change the Relay Base URL, API key, pending key or bootstrap token, and a typed API key is only accepted while the relay is in env mode.
 
 The **Relay Status** panel (and **Relay, Test Connection**) shows the state:
 
@@ -74,12 +76,15 @@ The **Relay Status** panel (and **Relay, Test Connection**) shows the state:
 Day-two buttons (shown when the relay is claimed and connected):
 
 - **Rotate Key**: generates a new key and swaps it in. The old key keeps working for other routes for 10 minutes, then is refused.
-- **Update Callback URL**: after changing the Callback URL field, pushes it to the relay without re-claiming.
+- **Update Callback URL**: after changing the Callback URL field, pushes it to the relay without re-claiming. The relay checks the new URL the same way as on claim and keeps the old one if it is unreachable. The new URL also applies to callbacks already queued (for example after moving the site, queued callbacks go to the new address).
+- **Replay Dead Callbacks**: appears when the panel shows dead callbacks (ones the relay gave up on, e.g. while the Callback URL was wrong). Sends them to this site again, oldest first.
 - **Retry Pending Key**: appears if a Connect or Rotate was sent but its answer was lost (the panel warns about it). Retrying finishes the same change; do it before anything else.
 
-If the relay reports `already_claimed` on Connect, it was claimed before. If the claim is yours, use Rotate Key. If the relay says its key comes from `RELAY_API_KEY` (env mode), type that value into **Relay API Key** by hand; the field is editable only for that case.
+If the relay reports `already_claimed` on Connect, it already has a key. If this site holds that key, the panel shows Connected and there is nothing to connect (use Rotate Key for a new key). If not (another site or an earlier install claimed it), see recovery below. If the relay says its key comes from `RELAY_API_KEY` (env mode), type that value into **Relay API Key** by hand; the field is editable only for that case.
 
-**Recovery from "Key rejected"** (key lost, relay claimed by another site, restored old backup): the claim is stored in the relay volume, so reset it. Stop the relay, wipe its volume, start it, and click **Connect Relay** again. Wiping the volume also deletes the device keys, so **every number must be relinked** (step 5). There is no other way to reclaim a relay without its key.
+**Recovery from "Key rejected", env mode** (the panel shows mode `env`): the key is the relay's `RELAY_API_KEY` environment variable. Type that exact value into **Relay API Key** and save. Do not wipe anything.
+
+**Recovery from "Key rejected", claimed mode** (key lost, relay claimed by another site, restored old backup): the claim is stored in the relay volume, so reset it. Stop the relay, wipe its volume, start it, and click **Connect Relay** again. Wiping the volume also deletes the device keys, so **every number must be relinked** (step 5). There is no other way to reclaim a relay without its key.
 
 ## Template parameters
 

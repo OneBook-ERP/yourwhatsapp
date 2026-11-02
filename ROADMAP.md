@@ -51,7 +51,7 @@ Design: `docs/superpowers/specs/2026-10-31-whatsmeow-relay-design.md`. Compariso
 - [x] Settings page relay panel: connection status, relay version, session count, **Test Connection**, **Rotate Key**.
 - [x] `GET /health` on the relay (unauthenticated, no data) for the docker healthcheck (→ §0).
 - [x] `RELAY_HOST` bind option (default `0.0.0.0` in Docker, `127.0.0.1` for bare-metal installs) (→ §0).
-- [ ] Setup guide (`DEPLOYMENT.md`): compose snippet, Settings walkthrough, pairing, backup of the sessions volume.
+- [x] Setup guide (`DEPLOYMENT.md`): compose snippet, Settings walkthrough, pairing, backup of the sessions volume.
 
 ### B. Session lifecycle (Docker restarts containers often)
 - [x] 🚫 (→ §0) Auto-restore every paired session on relay boot (from `.sessions/`) — today a relay restart leaves all accounts `Active` in Frappe but unable to send until manually reconnected.
