@@ -2,18 +2,19 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, now_datetime
 
 from yourwhatsapp.yourwhatsapp import api
 from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings.whatsapp_settings import write_password
+from yourwhatsapp.yourwhatsapp.tests.utils import LiveSafeTestCase
 
 RELAY_KEY = "test-relay-key"
 FAILOVER_TARGET = "yourwhatsapp.yourwhatsapp.relay_client.handle_async_failure"
 
 
-class TestRelayCallbacks(IntegrationTestCase):
+class TestRelayCallbacks(LiveSafeTestCase):
 	def setUp(self):
+		super().setUp()
 		write_password("relay_api_key", RELAY_KEY)
 
 		key_patch = patch("frappe.get_request_header", return_value=RELAY_KEY)
@@ -26,9 +27,6 @@ class TestRelayCallbacks(IntegrationTestCase):
 		self.addCleanup(self.enqueue.stop)
 
 		self.account = self._make_account("Relay Test A")
-
-	def tearDown(self):
-		frappe.db.rollback()
 
 	def _make_account(self, name, **fields):
 		return frappe.get_doc(

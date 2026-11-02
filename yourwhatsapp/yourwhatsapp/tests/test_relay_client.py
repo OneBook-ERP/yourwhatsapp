@@ -3,12 +3,12 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 import requests
-from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, now_datetime
 
 from yourwhatsapp.yourwhatsapp import api, relay_client, routing, tasks
 from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings.whatsapp_settings import write_password
 from yourwhatsapp.yourwhatsapp.routing import to_system_datetime
+from yourwhatsapp.yourwhatsapp.tests.utils import LiveSafeTestCase
 
 RELAY_KEY = "test-relay-key"
 PENDING_KEY = "p" * 43
@@ -21,8 +21,9 @@ def relay_response(status_code, body=None):
 	return response
 
 
-class TestRelayClient(IntegrationTestCase):
+class TestRelayClient(LiveSafeTestCase):
 	def setUp(self):
+		super().setUp()
 		settings = frappe.get_single("WhatsApp Settings")
 		settings.relay_base_url = "http://relay.test"
 		settings.save(ignore_permissions=True)
@@ -32,8 +33,6 @@ class TestRelayClient(IntegrationTestCase):
 		self.test_accounts = set()
 		real_eligible = routing.get_eligible_accounts
 		for patcher in (
-			# adopt_pending_key commits its promotion; in tests that must not reach the live site.
-			patch.object(frappe.db, "commit"),
 			patch("frappe.enqueue"),
 			patch("frappe.get_request_header", return_value=RELAY_KEY),
 			patch.object(
@@ -49,9 +48,6 @@ class TestRelayClient(IntegrationTestCase):
 
 		self.account_a = self._make_account("Client Test A")
 		self.account_b = self._make_account("Client Test B")
-
-	def tearDown(self):
-		frappe.db.rollback()
 
 	def _make_account(self, name, **fields):
 		self.test_accounts.add(name)

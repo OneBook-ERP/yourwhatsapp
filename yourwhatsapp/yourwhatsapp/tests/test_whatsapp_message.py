@@ -1,13 +1,14 @@
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from yourwhatsapp.yourwhatsapp import routing
+from yourwhatsapp.yourwhatsapp.tests.utils import LiveSafeTestCase
 
 
-class TestOutgoingMessage(IntegrationTestCase):
+class TestOutgoingMessage(LiveSafeTestCase):
 	def setUp(self):
+		super().setUp()
 		# Route only among this test's accounts, without touching the live ones.
 		self.test_accounts = set()
 		real_eligible = routing.get_eligible_accounts
@@ -23,9 +24,6 @@ class TestOutgoingMessage(IntegrationTestCase):
 		):
 			patcher.start()
 			self.addCleanup(patcher.stop)
-
-	def tearDown(self):
-		frappe.db.rollback()
 
 	def _make_account(self, name, phone_number, **fields):
 		self.test_accounts.add(name)

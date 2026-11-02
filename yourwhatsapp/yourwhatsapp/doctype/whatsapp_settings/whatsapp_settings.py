@@ -98,7 +98,9 @@ class WhatsAppSettings(Document):
 		above) goes through; the pending key never changes from a form."""
 		if self.flags.ignore_save_passwords is True:
 			return
-		ignored = list(self.flags.ignore_save_passwords or [])
+		# Rebuilt on every save: a second save of the same doc must not inherit
+		# the previous save's entries, which would swallow a newly typed key.
+		ignored = [name for name in self.flags.ignore_save_passwords or [] if name not in STORED_KEYS]
 		for fieldname in STORED_KEYS:
 			if fieldname == "relay_api_key" and fieldname in changed:
 				continue
@@ -319,7 +321,9 @@ def adopt_pending_key():
 	or rotation whose 200 was lost), make that the current key and return it.
 
 	Promotes under the key-change lock, and only if the pending key is still
-	the one probed; commits at once so the send's HTTP calls hold no row lock."""
+	the one probed; commits at once so the send's HTTP calls hold no row lock.
+	That commit also commits whatever the dispatch has written to its own
+	message so far."""
 	settings = frappe.get_single(DOCTYPE)
 	pending = settings.get_password("relay_pending_key", raise_exception=False)
 	if not pending or settings._accepts(pending) != ACCEPTED:

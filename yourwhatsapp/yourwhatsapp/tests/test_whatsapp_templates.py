@@ -1,13 +1,10 @@
 import frappe
-from frappe.tests import IntegrationTestCase
 
 from yourwhatsapp.patches.v1_0 import approve_existing_whatsapp_templates
+from yourwhatsapp.yourwhatsapp.tests.utils import LiveSafeTestCase
 
 
-class TestWhatsAppTemplates(IntegrationTestCase):
-	def tearDown(self):
-		frappe.db.rollback()
-
+class TestWhatsAppTemplates(LiveSafeTestCase):
 	def _template(self, name, **fields):
 		return frappe.get_doc(
 			{

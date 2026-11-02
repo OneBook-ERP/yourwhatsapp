@@ -3,12 +3,12 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 import requests
-from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, now_datetime
 
 from yourwhatsapp import hooks
 from yourwhatsapp.yourwhatsapp import relay_client, tasks
 from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings.whatsapp_settings import write_password
+from yourwhatsapp.yourwhatsapp.tests.utils import LiveSafeTestCase
 
 RELAY = "http://relay.test"
 RELAY_KEY = "test-relay-key"
@@ -23,12 +23,13 @@ def relay_status(status):
 	return response
 
 
-class TestReconcileAccountStatus(IntegrationTestCase):
+class TestReconcileAccountStatus(LiveSafeTestCase):
 	"""Runs in a rolled-back transaction; the relay is mocked. The job is limited
 	to the test's own accounts (names=), so the live ones and their cache
 	entries are never touched."""
 
 	def setUp(self):
+		super().setUp()
 		settings = frappe.get_single("WhatsApp Settings")
 		settings.relay_base_url = RELAY
 		settings.save(ignore_permissions=True)
@@ -40,7 +41,7 @@ class TestReconcileAccountStatus(IntegrationTestCase):
 	def tearDown(self):
 		for account in self.accounts:
 			frappe.cache.delete_value(tasks.relay_down_key(account.name))
-		frappe.db.rollback()
+		super().tearDown()
 
 	def _account(self, name, relay, **fields):
 		doc = frappe.get_doc(

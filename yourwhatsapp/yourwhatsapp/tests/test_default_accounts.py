@@ -2,12 +2,12 @@ from datetime import timedelta
 from unittest.mock import MagicMock, patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 from frappe.utils import now_datetime
 
 from yourwhatsapp.patches.v1_0 import fill_default_whatsapp_accounts
 from yourwhatsapp.yourwhatsapp import api, routing, tasks
 from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings.whatsapp_settings import write_password
+from yourwhatsapp.yourwhatsapp.tests.utils import LiveSafeTestCase
 
 DEFAULT_FIELDS = ("default_outgoing_account", "default_incoming_account")
 RELAY_KEY = "test-relay-key"
@@ -21,10 +21,11 @@ def relay_response(body):
 	return response
 
 
-class DefaultsTestCase(IntegrationTestCase):
+class DefaultsTestCase(LiveSafeTestCase):
 	"""Everything runs in a transaction that is rolled back: the live Settings defaults are never kept changed."""
 
 	def setUp(self):
+		super().setUp()
 		settings = frappe.get_single("WhatsApp Settings")
 		settings.relay_base_url = "http://relay.test"
 		settings.save(ignore_permissions=True)
@@ -34,9 +35,6 @@ class DefaultsTestCase(IntegrationTestCase):
 		self.addCleanup(key_patch.stop)
 		self._set_defaults(None, None)
 		self.account = self._make_account("Default Test A", "15550001001", status="Disconnected")
-
-	def tearDown(self):
-		frappe.db.rollback()
 
 	def _make_account(self, name, phone_number, **fields):
 		return frappe.get_doc(
@@ -76,10 +74,13 @@ class TestDefaultAccounts(DefaultsTestCase):
 		other = self._make_account("Default Test B", "15550001002")
 		self._set_defaults(other.name, other.name)
 		routing.set_account_active(self.account.name)
-		# Repointed at an Active account (which one depends on the site's priorities).
-		for default in self._defaults():
-			self.assertNotEqual(default, "missing-account")
-			self.assertEqual(self._status(frappe._dict(name=default)), "Active")
+		self.assertEqual(self._defaults(), (other.name, other.name))
+
+	def test_inactive_default_repointed(self):
+		other = self._make_account("Default Test B", "15550001002", status="Disconnected")
+		self._set_defaults(other.name, other.name)
+		routing.set_account_active(self.account.name)
+		self.assertEqual(self._defaults(), (self.account.name, self.account.name))
 
 	def test_dangling_default_replaced(self):
 		self._set_defaults("No Such Account", "No Such Account")

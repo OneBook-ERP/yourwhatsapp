@@ -2,9 +2,9 @@ from unittest.mock import MagicMock, patch
 
 import frappe
 import requests
-from frappe.tests import IntegrationTestCase
 
 from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings.whatsapp_settings import write_password
+from yourwhatsapp.yourwhatsapp.tests.utils import LiveSafeTestCase
 
 RELAY_KEY = "test-relay-key"
 
@@ -17,8 +17,9 @@ def relay_response(status_code=200, body=None):
 	return response
 
 
-class TestWhatsAppAccount(IntegrationTestCase):
+class TestWhatsAppAccount(LiveSafeTestCase):
 	def setUp(self):
+		super().setUp()
 		settings = frappe.get_single("WhatsApp Settings")
 		settings.relay_base_url = "http://relay.test"
 		settings.save(ignore_permissions=True)
@@ -32,9 +33,6 @@ class TestWhatsAppAccount(IntegrationTestCase):
 				"proxy": "socks5://proxy.test:1080",
 			}
 		).insert(ignore_permissions=True)
-
-	def tearDown(self):
-		frappe.db.rollback()
 
 	def test_connect_sends_proxy(self):
 		with patch("requests.post", return_value=relay_response(body={"status": "starting"})) as post:

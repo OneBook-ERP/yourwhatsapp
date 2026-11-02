@@ -2,22 +2,20 @@ import json
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 from frappe.utils import formatdate
 
 from yourwhatsapp.yourwhatsapp import relay_client, routing
 from yourwhatsapp.yourwhatsapp.templating import placeholders, render, resolve
+from yourwhatsapp.yourwhatsapp.tests.utils import LiveSafeTestCase
 
 
-class TestTemplateParameters(IntegrationTestCase):
+class TestTemplateParameters(LiveSafeTestCase):
 	def setUp(self):
+		super().setUp()
 		# Never route to (or enqueue a send on) the live site's accounts.
 		self.enqueue = patch("frappe.enqueue").start()
 		patch.object(routing, "get_eligible_accounts", return_value=[]).start()
 		self.addCleanup(patch.stopall)
-
-	def tearDown(self):
-		frappe.db.rollback()
 
 	def _template(self, name, body, rows=(), **fields):
 		return frappe.get_doc(

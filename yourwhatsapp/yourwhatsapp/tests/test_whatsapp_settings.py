@@ -4,10 +4,11 @@ from unittest.mock import patch
 import frappe
 import requests
 from frappe.database import get_db
-from frappe.tests import IntegrationTestCase
+from frappe.utils.password import get_decrypted_password
 
 from yourwhatsapp.yourwhatsapp import api
 from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings import whatsapp_settings as ws
+from yourwhatsapp.yourwhatsapp.tests.utils import LiveSafeTestCase
 
 BASE_URL = "http://relay.test"
 OLD_KEY = "old-key-" + "o" * 32
@@ -142,8 +143,9 @@ class FakeRelay:
 		return [c["route"] for c in self.calls]
 
 
-class TestWhatsAppSettingsRelay(IntegrationTestCase):
+class TestWhatsAppSettingsRelay(LiveSafeTestCase):
 	def setUp(self):
+		super().setUp()
 		settings = frappe.get_single("WhatsApp Settings")
 		settings.relay_base_url = BASE_URL
 		settings.relay_reachable_frappe_url = ""
@@ -151,15 +153,10 @@ class TestWhatsAppSettingsRelay(IntegrationTestCase):
 		# Keys go in the way the controller writes them: a typed key needs an env-mode relay.
 		for fieldname in ("relay_api_key", "relay_pending_key", "relay_bootstrap_token"):
 			ws.write_password(fieldname, None)
-		# The controller commits the pending key before calling the relay; in
-		# tests that commit must not reach the live site.
-		commit = patch.object(frappe.db, "commit")
-		self.commit = commit.start()
-		self.addCleanup(commit.stop)
 
 	def tearDown(self):
 		frappe.set_user("Administrator")
-		frappe.db.rollback()
+		super().tearDown()
 		# Writes above cached test values in Redis; the rollback doesn't undo those.
 		frappe.clear_document_cache("WhatsApp Settings", "WhatsApp Settings")
 
@@ -192,7 +189,7 @@ class TestWhatsAppSettingsRelay(IntegrationTestCase):
 		def claim(headers, body):
 			# By the time the relay sees the key it is committed as pending,
 			# and not yet the current key.
-			seen["keys"], seen["committed"] = self._keys(), self.commit.called
+			seen["keys"], seen["committed"] = self._keys(), self.commit_mock.called
 			return relay._claim(body)
 
 		relay.fail[("POST", "/claim")] = claim
@@ -731,6 +728,21 @@ class TestWhatsAppSettingsRelay(IntegrationTestCase):
 		self.assertEqual(self._keys(), (OLD_KEY, pending))
 		self.assertEqual(self._auth_fields(), {"relay_api_key", "relay_pending_key"})
 
+	def test_keep_stored_keys_rebuilds_on_second_save(self):
+		typed = "typed-key-" + "t" * 32
+		self._set_keys(current=OLD_KEY)
+		self._use(FakeRelay(mode="env", current=typed))
+		settings = self._settings()
+		settings.routing_strategy = "Priority"
+		settings.save()  # leaves the stored keys in flags.ignore_save_passwords
+		settings.relay_api_key = typed
+
+		settings.save()
+
+		# Read from __Auth: the saved doc object would answer with the typed value itself.
+		stored = get_decrypted_password("WhatsApp Settings", "WhatsApp Settings", "relay_api_key", raise_exception=False)
+		self.assertEqual(stored, typed)
+
 	def test_form_save_with_empty_or_mask_never_deletes_current_key(self):
 		self._set_keys(current=OLD_KEY)
 		for value in ("", None, "*****", "•" * 8):
@@ -776,12 +788,12 @@ class TestWhatsAppSettingsRelay(IntegrationTestCase):
 		pending = "a" * 43
 		self._set_keys(current=OLD_KEY, pending=pending)
 		self._use(FakeRelay(mode="claimed", current=pending))
-		self.commit.reset_mock()
+		self.commit_mock.reset_mock()
 
 		self.assertEqual(ws.adopt_pending_key(), pending)
 
 		self.assertEqual(self._keys(), (pending, None))
-		self.assertTrue(self.commit.called)
+		self.assertTrue(self.commit_mock.called)
 
 	def test_adopt_pending_key_skips_when_lock_held(self):
 		pending = "a" * 43

@@ -104,7 +104,9 @@ def send_message(message_name: str):
 
 def handle_async_failure(message_name: str, error_code: str):
 	"""Re-dispatch a message the relay accepted but then failed to send (api.message_status enqueues this)."""
-	# Row lock: attempted_accounts is read-modify-written below.
+	# Row lock: attempted_accounts is read-modify-written below. Note that
+	# adopt_pending_key (reached via a 401 in dispatch) commits, which also
+	# commits this dispatch's own message writes and releases this lock.
 	doc = frappe.get_doc("WhatsApp Message", message_name, for_update=True)
 	if doc.type != "Outgoing" or doc.status != "Failed":
 		return
