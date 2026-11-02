@@ -31,7 +31,7 @@ function test_connection(frm) {
 
 function add_relay_buttons(frm, info) {
 	const group = __("Relay");
-	["Connect Relay", "Rotate Key", "Update Callback URL", "Retry Pending Key"].forEach((label) =>
+	["Connect Relay", "Rotate Key", "Update Callback URL", "Retry Pending Key", "Replay Dead Callbacks"].forEach((label) =>
 		frm.remove_custom_button(__(label), group)
 	);
 
@@ -52,6 +52,17 @@ function add_relay_buttons(frm, info) {
 			group
 		);
 		frm.add_custom_button(__("Update Callback URL"), () => run(frm, "update_callback"), group);
+	}
+	if (info.state === "ok" && info.outbox && info.outbox.dead > 0) {
+		frm.add_custom_button(
+			__("Replay Dead Callbacks"),
+			() =>
+				frappe.confirm(
+					__("Send the {0} callbacks the relay gave up on to this site again?", [info.outbox.dead]),
+					() => run(frm, "replay_dead_callbacks")
+				),
+			group
+		);
 	}
 }
 

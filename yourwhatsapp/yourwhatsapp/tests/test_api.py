@@ -233,3 +233,9 @@ class TestRelayCallbacks(IntegrationTestCase):
 				api.message_status(status="Sent", message_id="X")
 			with self.assertRaises(frappe.PermissionError):
 				api.account_event(self.account.session_id, "temp_banned")
+
+	def test_ping_verifies_relay_key(self):
+		self.assertEqual(api.ping(), {"ok": True})
+		with patch("frappe.get_request_header", return_value="wrong"):
+			with self.assertRaises(frappe.PermissionError):
+				api.ping()

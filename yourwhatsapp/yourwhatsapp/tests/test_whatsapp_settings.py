@@ -12,7 +12,14 @@ from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings import whatsapp_setting
 BASE_URL = "http://relay.test"
 OLD_KEY = "old-key-" + "o" * 32
 ROLE_USER = "relay-settings-admin@example.com"
-METHODS = ("connect_relay", "rotate_key", "update_callback", "test_connection", "retry_pending")
+METHODS = (
+	"connect_relay",
+	"rotate_key",
+	"update_callback",
+	"test_connection",
+	"retry_pending",
+	"replay_dead_callbacks",
+)
 
 
 def _response(status, body=None):
@@ -77,6 +84,10 @@ class FakeRelay:
 			return self._rotate(key, body["api_key"])
 		if route == ("PUT", "/claim/callback"):
 			return self._set_callback(key, body)
+		if route == ("POST", "/outbox/dead/replay"):
+			if not self._authorized(key):
+				return _response(401, {"error": "invalid api key"})
+			return _response(200, {"replayed": 3})
 		raise AssertionError(f"unexpected route {route}")
 
 	def _info(self, key):
@@ -508,6 +519,50 @@ class TestWhatsAppSettingsRelay(IntegrationTestCase):
 		self.assertEqual(
 			call["json"], {"callback_url": "http://frontend:8080", "site_name": frappe.local.site}
 		)
+
+	def test_connect_callback_unreachable_explains_and_clears_pending(self):
+		relay = FakeRelay()
+		relay.fail[("POST", "/claim")] = _response(400, {"error": "callback_unreachable", "detail": "http 404"})
+		self._use(relay)
+
+		result = self._settings().connect_relay()
+
+		self.assertFalse(result["ok"])
+		self.assertIn("Callback URL", result["message"])
+		self.assertIn("http 404", result["message"])
+		self.assertEqual(self._keys(), (None, None))
+
+	def test_update_callback_unreachable_explains(self):
+		self._set_keys(current=OLD_KEY)
+		relay = FakeRelay(mode="claimed", current=OLD_KEY)
+		relay.fail[("PUT", "/claim/callback")] = _response(400, {"error": "callback_unreachable", "detail": "timeout"})
+		self._use(relay)
+
+		result = self._settings().update_callback()
+
+		self.assertFalse(result["ok"])
+		self.assertIn("Callback URL", result["message"])
+		self.assertIn("timeout", result["message"])
+		self.assertEqual(self._keys(), (OLD_KEY, None))
+
+	def test_replay_dead_callbacks(self):
+		self._set_keys(current=OLD_KEY)
+		relay = self._use(FakeRelay(mode="claimed", current=OLD_KEY))
+
+		result = self._settings().replay_dead_callbacks()
+
+		self.assertTrue(result["ok"])
+		self.assertIn("3", result["message"])
+		self.assertEqual(relay.call("POST", "/outbox/dead/replay")["headers"]["x-api-key"], OLD_KEY)
+
+	def test_replay_dead_callbacks_key_rejected(self):
+		self._set_keys(current=OLD_KEY)
+		self._use(FakeRelay(mode="claimed", current="another-key-" + "a" * 32))
+
+		result = self._settings().replay_dead_callbacks()
+
+		self.assertFalse(result["ok"])
+		self.assertNotIn(OLD_KEY, result["message"])
 
 	def test_update_callback_env_mode(self):
 		self._set_keys(current=OLD_KEY)

@@ -34,6 +34,14 @@ def _verify_relay_key():
 
 
 @frappe.whitelist(allow_guest=True, methods=["POST"])
+def ping():
+	"""The relay calls this before it accepts a callback URL: an answer proves
+	the URL reaches this site and that the site knows the key it will sign with."""
+	_verify_relay_key()
+	return {"ok": True}
+
+
+@frappe.whitelist(allow_guest=True, methods=["POST"])
 def inbound_message(
 	session_id: str,
 	from_number: str,

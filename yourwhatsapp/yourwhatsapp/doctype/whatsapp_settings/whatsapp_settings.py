@@ -31,6 +31,10 @@ PROBE_UNKNOWN = (
 	"The relay did not answer clearly whether it already uses the pending key. "
 	"The pending key is kept: use Retry."
 )
+CALLBACK_UNREACHABLE = (
+	"The relay could not reach this site at the Callback URL ({0}). Set Callback URL to an address "
+	"the relay can reach (in Docker the internal URL, e.g. http://frontend:8080), save, and try again."
+)
 ACCEPTED, REJECTED, UNKNOWN = "accepted", "rejected", "unknown"
 # Answers that prove the relay refused this request, once /info confirms it
 # doesn't take the pending key either.
@@ -102,6 +106,22 @@ class WhatsAppSettings(Document):
 			return {"ok": True, "message": _("Callback URL updated.")}
 		if _error_code(response) == "env_mode":
 			return _failed(ENV_MODE_CALLBACK, self._known_keys())
+		return _failed(_refusal(response), self._known_keys())
+
+	@frappe.whitelist(methods=["POST"])
+	def replay_dead_callbacks(self):
+		"""Requeue every callback the relay gave up on, e.g. after fixing the Callback URL."""
+		frappe.only_for("System Manager")
+		current = self._require_current_key()
+		try:
+			response = self._request("POST", "/outbox/dead/replay", key=current)
+		except requests.exceptions.RequestException as exc:
+			return _failed(_unreachable(exc), self._known_keys())
+		if _ok(response):
+			count = _json(response).get("replayed", 0)
+			return {"ok": True, "message": _("{0} dead callbacks requeued.").format(count)}
+		if response.status_code == 401:
+			return _failed(REFUSALS["invalid api key"], self._known_keys())
 		return _failed(_relay_error(response), self._known_keys())
 
 	@frappe.whitelist()
@@ -168,7 +188,7 @@ class WhatsAppSettings(Document):
 		if accepted is UNKNOWN:
 			return _failed(PROBE_UNKNOWN, secrets_shown)
 		write_password("relay_pending_key", None)
-		return _failed(REFUSALS.get(_error_code(response)) or _relay_error(response), secrets_shown)
+		return _failed(_refusal(response), secrets_shown)
 
 	def _promote_pending(self, key=None):
 		write_password("relay_api_key", key or self.get_password("relay_pending_key"))
@@ -312,6 +332,13 @@ def _json(response):
 
 def _error_code(response):
 	return _json(response).get("error")
+
+
+def _refusal(response):
+	code = _error_code(response)
+	if code == "callback_unreachable":
+		return _(CALLBACK_UNREACHABLE).format(_json(response).get("detail") or code)
+	return REFUSALS.get(code) or _relay_error(response)
 
 
 def _relay_error(response):
