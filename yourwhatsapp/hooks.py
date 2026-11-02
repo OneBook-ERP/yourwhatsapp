@@ -151,7 +151,11 @@ app_license = "mit"
 
 scheduler_events = {
 	"cron": {
-		"*/5 * * * *": ["yourwhatsapp.yourwhatsapp.tasks.recover_rate_limited_accounts"],
+		"*/5 * * * *": [
+			"yourwhatsapp.yourwhatsapp.tasks.recover_rate_limited_accounts",
+			# Safety net for missed relay callbacks; tasks.RECONCILE_MINUTES matches this cron.
+			"yourwhatsapp.yourwhatsapp.tasks.reconcile_account_status",
+		],
 		# Every minute: relay-unavailable retries back off 1, 2, 5, 10, 20 min.
 		"* * * * *": ["yourwhatsapp.yourwhatsapp.tasks.retry_relay_unavailable_messages"],
 	},
