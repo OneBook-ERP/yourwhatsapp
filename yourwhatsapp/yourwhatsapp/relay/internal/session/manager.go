@@ -34,7 +34,9 @@ const (
 const (
 	// maxReactionRunes bounds a reaction's emoji; ZWJ sequences and skin
 	// tones make one emoji several runes.
-	maxReactionRunes     = 16
+	maxReactionRunes = 16
+	// maxParticipantDigits: E.164 allows 15; a little slack, no unbounded JIDs.
+	maxParticipantDigits = 20
 	defaultQueueCapacity = 50
 	inFlightWait         = 10 * time.Second
 )
@@ -495,6 +497,8 @@ func validateSend(req SendRequest) (media []byte, serr *SendError) {
 		return nil, bad("to is required")
 	case req.LocalID == "":
 		return nil, bad("local_message_id is required")
+	case len(onlyDigits(req.ReplyParticipant)) > maxParticipantDigits:
+		return nil, bad("reply_participant is not a phone number")
 	case req.ContentType == ContentReaction:
 		switch {
 		case req.ReplyToID == "":

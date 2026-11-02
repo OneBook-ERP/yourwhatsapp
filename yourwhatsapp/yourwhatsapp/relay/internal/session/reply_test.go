@@ -292,3 +292,19 @@ func TestTextAfterReactionWaitsGap(t *testing.T) {
 		t.Fatalf("sleeps = %v, want [~4s gap, 1s typing]", slept)
 	}
 }
+
+// reply_participant is a phone number: more than 20 digits is refused, not trimmed.
+func TestReplyParticipantCapped(t *testing.T) {
+	h := newHarness(t)
+	connectedWithPeer(h)
+	long := SendRequest{SessionID: "A", To: "+919000000001", Message: "hi", LocalID: "p-long",
+		ReplyToID: "OUT1", ReplyFromMe: true, ReplyParticipant: strings.Repeat("9", 21)}
+	if serr := h.send(long); serr == nil || serr.Code != CodeBadRequest || serr.HTTP != 400 {
+		t.Fatalf("21 digits: err = %+v, want 400 bad_request", serr)
+	}
+	ok := long
+	ok.LocalID, ok.ReplyParticipant = "p-ok", "+"+strings.Repeat("9", 20)
+	if serr := h.send(ok); serr != nil {
+		t.Fatalf("20 digits: err = %+v", serr)
+	}
+}
