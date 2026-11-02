@@ -50,7 +50,7 @@ and routes in `yourwhatsapp/yourwhatsapp/relay/README.md`), fill in **WhatsApp S
 ### Production
 
 Production runs the relay as its own container next to the Frappe stack. See
-`DEPLOYMENT.md` for the image build, compose override, backups and warm-up advice. The
+[`docs/setup.md`](docs/setup.md) for a step-by-step setup (Docker or bench), and `DEPLOYMENT.md` for the image build, compose override, backups and warm-up advice. The
 relay keeps device keys in one SQLite file (`relay.db`): back it up. The Docker files are
 untested until the first real deploy. Remaining blockers are tracked in `ROADMAP.md`
 (Phase 1.6).
