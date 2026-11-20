@@ -83,16 +83,20 @@ jobs:
       - name: Setup
         run: |
           pip install frappe-bench
-          bench init --skip-redis-config-generation --skip-assets --python "$(which python)" ~/frappe-bench
+          bench init --skip-redis-config-generation --skip-assets --frappe-branch version-16 --python "$(which python)" ~/frappe-bench
 
       - name: Install
         working-directory: /home/runner/frappe-bench
         run: |
+          # yourwhatsapp needs CRM (its doctypes and crm.api.whatsapp); the tests also
+          # resolve template fields on ERPNext doctypes (Customer, Sales Order).
+          bench get-app --skip-assets erpnext --branch version-16
+          bench get-app --skip-assets crm --branch develop
           bench get-app yourwhatsapp $GITHUB_WORKSPACE
           bench setup requirements --dev
           bench new-site --db-root-password root --admin-password admin test_site
-          bench --site test_site install-app yourwhatsapp
-          bench build
+          bench --site test_site install-app erpnext crm yourwhatsapp
+          bench build --app yourwhatsapp
         env:
           CI: 'Yes'
 
