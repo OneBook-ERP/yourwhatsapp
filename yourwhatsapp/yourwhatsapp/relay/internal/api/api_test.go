@@ -9,7 +9,10 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
+	"yourwhatsapp/relay/internal/claim"
+	"yourwhatsapp/relay/internal/config"
 	"yourwhatsapp/relay/internal/phone"
 	"yourwhatsapp/relay/internal/session"
 	"yourwhatsapp/relay/internal/store"
@@ -34,10 +37,11 @@ func (f *fakeManager) PairCode(_ context.Context, _, _ string, proxy *string) (s
 	f.pairProxy = proxy
 	return "ABCD-1234", f.pairErr
 }
+func (f *fakeManager) Connected() int                         { return 1 }
 func (f *fakeManager) Status(string) (string, string, string) { return "connected", "1@s", "1" }
 func (f *fakeManager) Pause(context.Context, string) error    { return nil }
-func (f *fakeManager) Resume(context.Context, string, *string) error {
-	return nil
+func (f *fakeManager) Resume(context.Context, string, *string) (string, error) {
+	return "connected", nil
 }
 func (f *fakeManager) Logout(context.Context, string) error { return session.ErrUnknownSession }
 func (f *fakeManager) Send(_ context.Context, req session.SendRequest) *session.SendError {
@@ -45,14 +49,34 @@ func (f *fakeManager) Send(_ context.Context, req session.SendRequest) *session.
 	return f.sendErr
 }
 
+// newServer serves an env-mode relay keyed with testKey.
 func newServer(t *testing.T, fm *fakeManager) (http.Handler, *store.Store) {
+	t.Helper()
+	h, st, _ := newServerWith(t, fm, config.Config{APIKey: testKey})
+	return h, st
+}
+
+func newServerWith(t *testing.T, fm *fakeManager, cfg config.Config) (http.Handler, *store.Store, *claim.State) {
+	t.Helper()
+	return newServerFull(t, fm, cfg, reachable, func() {})
+}
+
+// reachable is a callback check that always passes.
+func reachable(context.Context, string, string, string) error { return nil }
+
+func newServerFull(t *testing.T, fm *fakeManager, cfg config.Config, check CallbackChecker, notify func()) (http.Handler, *store.Store, *claim.State) {
 	t.Helper()
 	st, err := store.Open(context.Background(), t.TempDir())
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	return NewHandler(fm, st, testKey, slog.New(slog.NewJSONHandler(io.Discard, nil))), st
+	log := slog.New(slog.NewJSONHandler(io.Discard, nil))
+	cs, err := claim.New(st, cfg, time.Now, log)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return NewHandler(fm, st, cs, log, "test", check, notify), st, cs
 }
 
 func do(h http.Handler, method, path, body string, auth bool) *httptest.ResponseRecorder {
@@ -112,6 +136,14 @@ func TestStartPassesProxy(t *testing.T) {
 	}
 }
 
+func TestResumeReturnsStatus(t *testing.T) {
+	h, _ := newServer(t, &fakeManager{})
+	rec := do(h, "POST", "/session/t1/resume", `{"proxy":""}`, true)
+	if m := decode(t, rec); rec.Code != 200 || m["status"] != "connected" {
+		t.Fatalf("resume = %d %v", rec.Code, m)
+	}
+}
+
 func TestPairCode(t *testing.T) {
 	fm := &fakeManager{}
 	h, _ := newServer(t, fm)
@@ -154,6 +186,20 @@ func TestSendAccepted202(t *testing.T) {
 	}
 	if fm.sendReq.LocalID != "L1" || fm.sendReq.SessionID != "a" || !fm.sendReq.ToIsLID {
 		t.Fatalf("request not passed through: %+v", fm.sendReq)
+	}
+}
+
+func TestSendDecodesReplyFields(t *testing.T) {
+	fm := &fakeManager{}
+	h, _ := newServer(t, fm)
+	body := `{"session_id":"a","to":"919876543210","content_type":"reaction","message":"","local_message_id":"L1",` +
+		`"reply_to_message_id":"WAID-9","reply_from_me":true,"reply_text":"quoted","reply_participant":"919111111111"}`
+	if rec := do(h, "POST", "/message/send", body, true); rec.Code != 202 {
+		t.Fatalf("got %d %s", rec.Code, rec.Body)
+	}
+	if r := fm.sendReq; r.ReplyToID != "WAID-9" || !r.ReplyFromMe || r.ReplyText != "quoted" || r.ContentType != "reaction" ||
+		r.ReplyParticipant != "919111111111" {
+		t.Fatalf("reply fields not passed through: %+v", r)
 	}
 }
 
@@ -234,4 +280,12 @@ func TestDeadList(t *testing.T) {
 	if len(list) != 1 || list[0]["method"] != "m" || list[0]["last_error"] != "boom" {
 		t.Fatalf("list: %v", list)
 	}
+}
+
+func doWithKey(h http.Handler, method, path, key string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, nil)
+	req.Header.Set("x-api-key", key)
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
 }

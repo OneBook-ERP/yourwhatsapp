@@ -17,6 +17,22 @@
             "in_list_view": 1
         },
         {
+            "fieldname": "status",
+            "fieldtype": "Select",
+            "label": "Status",
+            "options": "APPROVED\nPENDING\nREJECTED",
+            "default": "APPROVED",
+            "in_list_view": 1,
+            "description": "CRM's template picker only offers APPROVED templates"
+        },
+        {
+            "fieldname": "for_doctype",
+            "fieldtype": "Link",
+            "label": "For DocType",
+            "options": "DocType",
+            "description": "Offer this template only on this DocType in CRM; empty means everywhere"
+        },
+        {
             "fieldname": "header",
             "fieldtype": "Data",
             "label": "Header"
@@ -27,6 +43,13 @@
             "label": "Template",
             "reqd": 1,
             "description": "Use {{1}}, {{2}}, ... as placeholders"
+        },
+        {
+            "fieldname": "parameters",
+            "fieldtype": "Table",
+            "label": "Parameters",
+            "options": "WhatsApp Template Parameter",
+            "description": "Where each {{n}} gets its value from the message's reference document"
         },
         {
             "fieldname": "footer",

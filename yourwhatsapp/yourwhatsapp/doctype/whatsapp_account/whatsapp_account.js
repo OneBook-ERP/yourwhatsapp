@@ -6,7 +6,8 @@ frappe.ui.form.on("WhatsApp Account", {
 	refresh(frm) {
 		if (frm.is_new()) return;
 
-		add_connect_button(frm);
+		// A linked, live number needs no pairing: only Pause / Logout apply.
+		if (frm.doc.status !== "Active") add_connect_button(frm);
 		add_session_buttons(frm);
 
 		if (frm.doc.status === "Disconnected" && frm.doc.qr_code && !frm._qr_poll_active) {
@@ -22,7 +23,10 @@ function add_connect_button(frm) {
 	}
 	frm.add_custom_button(__("Connect / Generate QR"), () => {
 		frm.call("connect").then(() => {
-			frappe.show_alert({ message: __("Starting session — waiting for QR..."), indicator: "blue" });
+			frappe.show_alert({
+				message: __("Starting session — waiting for QR..."),
+				indicator: "blue",
+			});
 			poll_until_connected(frm);
 		});
 	});
@@ -35,14 +39,25 @@ function add_session_buttons(frm) {
 		frm.add_custom_button(__("Pause"), () => frm.call("pause").then(() => frm.reload_doc()));
 	}
 	frm.add_custom_button(__("Logout"), () => {
-		frappe.confirm(__("Log this account out of WhatsApp? It will have to be paired again."), () =>
-			frm.call("logout").then(() => frm.reload_doc())
+		frappe.confirm(
+			__("Log this account out of WhatsApp? It will have to be paired again."),
+			() => frm.call("logout").then(() => frm.reload_doc())
 		);
 	});
 }
 
 function pair_with_code(frm) {
-	frm.call("pair_with_code").then((r) => show_pairing_dialog(frm, r.message.code));
+	frm.call("pair_with_code").then((r) => {
+		if (already_paired(frm, r.message)) return;
+		show_pairing_dialog(frm, r.message.code);
+	});
+}
+
+function already_paired(frm, result) {
+	if (!result || !result.already_paired) return false;
+	frappe.show_alert({ message: result.message, indicator: "green" });
+	frm.reload_doc();
+	return true;
 }
 
 function show_pairing_dialog(frm, code) {
@@ -51,7 +66,9 @@ function show_pairing_dialog(frm, code) {
 		fields: [{ fieldtype: "HTML", fieldname: "code_html" }],
 	});
 	dialog.get_field("code_html").$wrapper.html(
-		`<div style="font-family: monospace; font-size: 2rem; letter-spacing: 0.15em; text-align: center; margin: 1rem 0;">${frappe.utils.escape_html(code)}</div>
+		`<div style="font-family: monospace; font-size: 2rem; letter-spacing: 0.15em; text-align: center; margin: 1rem 0;">${frappe.utils.escape_html(
+			code
+		)}</div>
 		<p class="text-muted">${frappe.utils.escape_html(PAIRING_INSTRUCTIONS)}</p>`
 	);
 	dialog.show();

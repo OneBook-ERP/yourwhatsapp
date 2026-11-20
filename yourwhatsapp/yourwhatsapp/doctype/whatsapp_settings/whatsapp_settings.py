@@ -1,5 +1,467 @@
+import secrets
+from contextlib import contextmanager
+
+import frappe
+import requests
+from frappe import _
 from frappe.model.document import Document
+from frappe.utils import cint
+from frappe.utils.password import (
+	decrypt,
+	get_decrypted_password,
+	remove_encrypted_password,
+	set_encrypted_password,
+)
+
+DOCTYPE = "WhatsApp Settings"
+TIMEOUT = 15
+# The form tests the connection on every load: a dead relay must not hold it up for long.
+AUTO_TEST_TIMEOUT = 5
+KEY_LOCK_TIMEOUT = 10  # seconds to wait for another key change to commit its pending key
+ALREADY_CLAIMED = (
+	"This relay is already claimed. If this site holds its key, Test Connection shows Connected "
+	"and there is nothing to connect. Otherwise only resetting the relay's volume frees it, "
+	"and every number must then be relinked."
+)
+ENV_MODE = (
+	"This relay takes its key from its RELAY_API_KEY environment variable. "
+	"Type that value into Relay API Key by hand and save."
+)
+ENV_MODE_CALLBACK = (
+	"This relay takes its callback URL from its FRAPPE_BASE_URL environment variable; change it there."
+)
+KEY_PENDING = "A key change is still pending. Use Retry first so this site and the relay agree on the key."
+KEY_CHANGE_BUSY = "Another relay key change is in progress. Try again in a moment."
+KEYS_REJECTED = (
+	"The relay rejects both the current and the pending key. The pending key is kept. "
+	"If this relay is yours, reset the relay's volume and use Retry."
+)
+PROBE_UNKNOWN = (
+	"The relay did not answer clearly whether it already uses the pending key. "
+	"The pending key is kept: use Retry."
+)
+CALLBACK_UNREACHABLE = (
+	"The relay could not reach this site at the Callback URL ({0}). Set Callback URL to an address "
+	"the relay can reach (in Docker the internal URL, e.g. http://frontend:8080), save, and try again."
+)
+ACCEPTED, REJECTED, UNKNOWN = "accepted", "rejected", "unknown"
+# Who can reach the relay, and with which key: only a System Manager changes these.
+RELAY_CONNECTION_FIELDS = ("relay_base_url", "relay_api_key", "relay_pending_key", "relay_bootstrap_token")
+PASSWORD_FIELDS = ("relay_api_key", "relay_pending_key", "relay_bootstrap_token")
+# Written only by the controller (write_password); a form save never deletes or replaces
+# them with a mask. relay_api_key may still be typed in for an env-mode relay.
+STORED_KEYS = ("relay_api_key", "relay_pending_key")
+MASK_CHARS = frozenset("*\u2022")
+RELAY_FIELDS_FORBIDDEN = "Only a System Manager can change the relay connection settings ({0})."
+TYPED_KEY_NOT_ENV = (
+	"Relay API Key can only be typed in for a relay that takes its key from RELAY_API_KEY "
+	"(env mode); this relay is in {0} mode. Use the Relay buttons instead."
+)
+TYPED_KEY_UNREACHABLE = (
+	"Relay API Key can only be typed in for an env-mode relay, and the relay could not be reached "
+	"to check its mode: {0} The key was not saved."
+)
+# Answers that prove the relay refused this request, once /info confirms it
+# doesn't take the pending key either.
+REFUSALS = {
+	"already_claimed": ALREADY_CLAIMED,
+	"bad_bootstrap_token": "The relay rejected the bootstrap token.",
+	"env_mode": ENV_MODE,
+	"invalid api key": "The relay rejected the current key.",
+}
 
 
 class WhatsAppSettings(Document):
-	pass
+	def validate(self):
+		# Controller methods store keys with write_password, which skips this.
+		changed = self._changed_relay_fields()
+		if changed and "System Manager" not in frappe.get_roles():
+			labels = ", ".join(_(self.meta.get_label(fieldname)) for fieldname in changed)
+			frappe.throw(_(RELAY_FIELDS_FORBIDDEN).format(labels), frappe.PermissionError)
+		if "relay_api_key" in changed:
+			self._require_env_mode_relay()
+		self._keep_stored_keys(changed)
+
+	def _changed_relay_fields(self):
+		before = self.get_doc_before_save()
+		return [
+			fieldname
+			for fieldname in RELAY_CONNECTION_FIELDS
+			if _differs(fieldname, self.get(fieldname), before.get(fieldname) if before else None)
+		]
+
+	def _keep_stored_keys(self, changed):
+		"""Stop Frappe's _save_passwords from deleting or overwriting a stored key.
+
+		A stale form carries an empty or outdated value for keys the controller
+		wrote since it was loaded. Only a typed relay_api_key (env mode, checked
+		above) goes through; the pending key never changes from a form."""
+		if self.flags.ignore_save_passwords is True:
+			return
+		# Rebuilt on every save: a second save of the same doc must not inherit
+		# the previous save's entries, which would swallow a newly typed key.
+		ignored = [name for name in self.flags.ignore_save_passwords or [] if name not in STORED_KEYS]
+		for fieldname in STORED_KEYS:
+			if fieldname == "relay_api_key" and fieldname in changed:
+				continue
+			stored = get_decrypted_password(DOCTYPE, DOCTYPE, fieldname, raise_exception=False)
+			self.set(fieldname, "*" * len(stored) if stored else None)
+			ignored.append(fieldname)
+		self.flags.ignore_save_passwords = ignored
+
+	def _require_env_mode_relay(self):
+		"""A hand-typed key is only right for an env-mode relay; elsewhere it would lock this site out."""
+		try:
+			mode = self._relay_info().get("mode")
+		except requests.exceptions.RequestException as exc:
+			frappe.throw(_(TYPED_KEY_UNREACHABLE).format(_unreachable(exc)))
+		if mode != "env":
+			frappe.throw(_(TYPED_KEY_NOT_ENV).format(mode or _("an unknown")))
+
+	@frappe.whitelist(methods=["POST"])
+	def connect_relay(self):
+		frappe.only_for("System Manager")
+		self._refuse_if_pending()
+		try:
+			info = self._relay_info()
+		except requests.exceptions.RequestException as exc:
+			return _failed(_unreachable(exc), self._known_keys())
+		if info.get("mode") == "env":
+			return {"ok": False, "mode": "env", "message": ENV_MODE}
+		if info.get("claimed"):
+			return {"ok": False, "message": ALREADY_CLAIMED}
+		key = self._begin_key_change()
+		return self._claim(key)
+
+	@frappe.whitelist(methods=["POST"])
+	def rotate_key(self):
+		frappe.only_for("System Manager")
+		current = self._require_current_key()
+		key = self._begin_key_change()
+		return self._rotate(current, key)
+
+	@frappe.whitelist(methods=["POST"])
+	def retry_pending(self):
+		"""Finish a claim or rotation whose outcome is unknown, without ever dropping the pending key."""
+		frappe.only_for("System Manager")
+		pending = self.get_password("relay_pending_key", raise_exception=False)
+		if not pending:
+			frappe.throw(_("There is no pending key change to retry."))
+		try:
+			info = self._relay_info(pending)
+		except requests.exceptions.RequestException as exc:
+			return _failed(_unreachable(exc), self._known_keys())
+		if _authorized(info):
+			# The earlier claim or rotation landed; only its answer was lost.
+			return self._promote_pending()
+		if not info.get("claimed"):
+			return self._claim(pending)
+		current = self._current_key()
+		accepted = self._accepts(current) if current else REJECTED
+		if accepted == ACCEPTED:
+			return self._rotate(current, pending)
+		if accepted == UNKNOWN:
+			return _failed(PROBE_UNKNOWN, self._known_keys())
+		return {"ok": False, "state": "keys_rejected", "message": KEYS_REJECTED}
+
+	@frappe.whitelist(methods=["POST"])
+	def update_callback(self):
+		frappe.only_for("System Manager")
+		current = self._require_current_key()
+		body = {"callback_url": self._callback_url(), "site_name": frappe.local.site}
+		try:
+			response = self._request("PUT", "/claim/callback", key=current, body=body)
+		except requests.exceptions.RequestException as exc:
+			return _failed(_unreachable(exc), self._known_keys())
+		if _ok(response):
+			return {"ok": True, "message": _("Callback URL updated.")}
+		if _error_code(response) == "env_mode":
+			return _failed(ENV_MODE_CALLBACK, self._known_keys())
+		return _failed(_refusal(response), self._known_keys())
+
+	@frappe.whitelist(methods=["POST"])
+	def replay_dead_callbacks(self):
+		"""Requeue every callback the relay gave up on, e.g. after fixing the Callback URL."""
+		frappe.only_for("System Manager")
+		current = self._require_current_key()
+		try:
+			response = self._request("POST", "/outbox/dead/replay", key=current)
+		except requests.exceptions.RequestException as exc:
+			return _failed(_unreachable(exc), self._known_keys())
+		if _ok(response):
+			count = _json(response).get("replayed", 0)
+			return {"ok": True, "message": _("{0} dead callbacks requeued.").format(count)}
+		if response.status_code == 401:
+			return _failed(REFUSALS["invalid api key"], self._known_keys())
+		return _failed(_relay_error(response), self._known_keys())
+
+	@frappe.whitelist()
+	def test_connection(self, auto=False):
+		"""The relay's /info plus a state: ok, unreachable, key_rejected or unclaimed.
+
+		`auto`: the form's own check on load, which gives up sooner."""
+		frappe.only_for("System Manager")
+		pending = bool(self.get_password("relay_pending_key", raise_exception=False))
+		timeout = AUTO_TEST_TIMEOUT if cint(auto) else TIMEOUT
+		try:
+			response = self._request("GET", "/info", key=self._current_key(), timeout=timeout)
+		except requests.exceptions.RequestException as exc:
+			return self._unreachable_state(_unreachable(exc), pending)
+		if response.status_code == 401:
+			return {"state": "key_rejected", "pending": pending}
+		if not _ok(response):
+			return self._unreachable_state(_relay_error(response), pending)
+		info = _json(response)
+		return {**info, "state": _info_state(info), "pending": pending}
+
+	def _unreachable_state(self, message, pending):
+		return {"state": "unreachable", "pending": pending, "message": _scrub(message, self._known_keys())}
+
+	def _begin_key_change(self):
+		"""Commit a new pending key, unless another change already holds one.
+
+		The lock spans check, write and commit, so two admins can't both start
+		a change and overwrite each other's pending key."""
+		with _key_change_lock():
+			if _pending_key_committed():
+				frappe.throw(_(KEY_PENDING))
+			key = secrets.token_urlsafe(32)
+			write_password("relay_pending_key", key)
+			frappe.db.commit()
+		return key
+
+	def _claim(self, key):
+		body = {"api_key": key, "callback_url": self._callback_url(), "site_name": frappe.local.site}
+		token = self.get_password("relay_bootstrap_token", raise_exception=False)
+		if token:
+			body["bootstrap_token"] = token
+		return self._send_key_change(key, "POST", "/claim", None, body, _("Relay connected."))
+
+	def _rotate(self, current, key):
+		body = {"api_key": key}
+		return self._send_key_change(key, "POST", "/claim/rotate", current, body, _("Key rotated."))
+
+	def _send_key_change(self, key, method, path, auth_key, body, success):
+		"""Send an already committed pending key; it becomes current only on a 2xx,
+		or once the relay is seen to accept it."""
+		secrets_shown = [*self._known_keys(), key]
+		try:
+			response = self._request(method, path, key=auth_key, body=body)
+		except requests.exceptions.RequestException as exc:
+			return _failed(_unreachable(exc) + " " + _("Use Retry."), secrets_shown)
+		if _ok(response):
+			self._promote_pending(key)
+			return {"ok": True, "message": success}
+		if response.status_code >= 500:
+			# Outcome unknown (or the relay lost its claim): keep the key for Retry.
+			return _failed(_relay_error(response) + " " + _("Use Retry."), secrets_shown)
+		accepted = self._accepts(key)
+		if accepted == ACCEPTED:
+			# Refused now, but an earlier attempt already landed.
+			return self._promote_pending(key)
+		if accepted == UNKNOWN:
+			return _failed(PROBE_UNKNOWN, secrets_shown)
+		write_password("relay_pending_key", None)
+		return _failed(_refusal(response), secrets_shown)
+
+	def _promote_pending(self, key=None):
+		write_password("relay_api_key", key or self.get_password("relay_pending_key"))
+		write_password("relay_pending_key", None)
+		return {"ok": True, "message": _("The relay uses the new key; it is saved.")}
+
+	def _accepts(self, key):
+		"""ACCEPTED, REJECTED or UNKNOWN: /info shows the keyed detail only for an accepted key.
+
+		Only a definite answer counts as REJECTED (a 401, or a 2xx without the
+		detail); a timeout, reset or 5xx says nothing about the key."""
+		try:
+			response = self._request("GET", "/info", key=key)
+		except requests.exceptions.RequestException:
+			return UNKNOWN
+		if response.status_code == 401:
+			return REJECTED
+		if not _ok(response):
+			return UNKNOWN
+		return ACCEPTED if _authorized(_json(response)) else REJECTED
+
+	def _relay_info(self, key=None):
+		response = self._request("GET", "/info", key=key)
+		response.raise_for_status()
+		return _json(response)
+
+	def _request(self, method, path, key=None, body=None, timeout=TIMEOUT):
+		base_url = (self.relay_base_url or "").strip().rstrip("/")
+		if not base_url:
+			frappe.throw(_("Set the Relay Base URL first."))
+		headers = {"x-api-key": key} if key else {}
+		return requests.request(method, f"{base_url}{path}", headers=headers, json=body, timeout=timeout)
+
+	def _refuse_if_pending(self):
+		if self.get_password("relay_pending_key", raise_exception=False):
+			frappe.throw(_(KEY_PENDING))
+
+	def _require_current_key(self):
+		current = self._current_key()
+		if not current:
+			frappe.throw(_("There is no relay key yet: use Connect Relay first."))
+		return current
+
+	def _current_key(self):
+		return self.get_password("relay_api_key", raise_exception=False)
+
+	def _known_keys(self):
+		return [self._current_key(), self.get_password("relay_pending_key", raise_exception=False)]
+
+	def _callback_url(self):
+		return (self.relay_reachable_frappe_url or "").strip() or frappe.utils.get_url()
+
+
+def adopt_pending_key():
+	"""The relay refused this site's key: if it takes the pending key (a claim
+	or rotation whose 200 was lost), make that the current key and return it.
+
+	Promotes under the key-change lock, and only if the pending key is still
+	the one probed; commits at once so the send's HTTP calls hold no row lock.
+	That commit also commits whatever the dispatch has written to its own
+	message so far."""
+	settings = frappe.get_single(DOCTYPE)
+	pending = settings.get_password("relay_pending_key", raise_exception=False)
+	if not pending or settings._accepts(pending) != ACCEPTED:
+		return None
+	with _try_key_change_lock() as acquired:
+		if not acquired or _locked_pending_key() != pending:
+			return None
+		settings._promote_pending(pending)
+		frappe.db.commit()
+	return pending
+
+
+def write_password(fieldname, value):
+	"""Store a Settings password directly, without saving (and returning) the whole doc.
+
+	The Singles row holds the usual mask so a later form save keeps the secret.
+	Settings' modified stays as it is, so an open form can still be saved."""
+	if value:
+		set_encrypted_password(DOCTYPE, DOCTYPE, value, fieldname)
+		frappe.db.set_single_value(DOCTYPE, fieldname, "*" * len(value), update_modified=False)
+	else:
+		remove_encrypted_password(DOCTYPE, DOCTYPE, fieldname)
+		frappe.db.set_single_value(DOCTYPE, fieldname, None, update_modified=False)
+
+
+def key_lock_name():
+	# MariaDB named locks are server-wide: scope this one to the site's database.
+	return f"{frappe.conf.db_name}:whatsapp_relay_key"
+
+
+@contextmanager
+def _key_change_lock():
+	with _try_key_change_lock() as acquired:
+		if not acquired:
+			frappe.throw(_(KEY_CHANGE_BUSY))
+		yield
+
+
+@contextmanager
+def _try_key_change_lock():
+	"""Yield whether the key-change lock was taken; release it afterwards."""
+	acquired = frappe.db.sql("SELECT GET_LOCK(%s, %s)", (key_lock_name(), KEY_LOCK_TIMEOUT))[0][0] == 1
+	try:
+		yield acquired
+	finally:
+		if acquired:
+			frappe.db.sql("SELECT RELEASE_LOCK(%s)", (key_lock_name(),))
+
+
+def _locked_pending_key():
+	# A locking read: the latest committed pending key, not this transaction's snapshot.
+	row = frappe.db.sql(
+		"SELECT password FROM `__Auth` WHERE doctype=%s AND name=%s AND fieldname=%s AND encrypted=1 "
+		"FOR UPDATE",
+		(DOCTYPE, DOCTYPE, "relay_pending_key"),
+	)
+	if not row or not row[0][0]:
+		return None
+	return decrypt(row[0][0], key=f"{DOCTYPE}.{DOCTYPE}.relay_pending_key")
+
+
+def _pending_key_committed():
+	# A locking read sees the latest committed row, not this transaction's
+	# snapshot, so a pending key another request just committed is not missed.
+	return bool(
+		frappe.db.sql(
+			"SELECT 1 FROM `__Auth` WHERE doctype=%s AND name=%s AND fieldname=%s FOR UPDATE",
+			(DOCTYPE, DOCTYPE, "relay_pending_key"),
+		)
+	)
+
+
+def _differs(fieldname, new, old):
+	new, old = new or "", old or ""
+	if fieldname in PASSWORD_FIELDS:
+		if _is_mask(new) and _is_mask(old):
+			return False  # masks of any length or style stand for the stored value
+		if fieldname in STORED_KEYS and (not new or _is_mask(new)):
+			return False  # kept as stored by _keep_stored_keys
+	return new != old
+
+
+def _is_mask(value):
+	return bool(value) and set(value) <= MASK_CHARS
+
+
+def _ok(response):
+	return 200 <= response.status_code < 300
+
+
+def _authorized(info):
+	return "sessions" in info
+
+
+def _info_state(info):
+	if not info.get("claimed"):
+		return "unclaimed"
+	# /info answers 200 to a wrong key too, just without the keyed detail.
+	return "ok" if _authorized(info) else "key_rejected"
+
+
+def _failed(message, keys):
+	return {"ok": False, "message": _scrub(message, keys)}
+
+
+def _scrub(message, keys):
+	for key in keys:
+		if key:
+			message = message.replace(key, "****")
+	return message
+
+
+def _unreachable(exc):
+	return _("Relay not reachable: {0}.").format(exc)
+
+
+def _json(response):
+	try:
+		body = response.json()
+	except ValueError:
+		return {}
+	return body if isinstance(body, dict) else {}
+
+
+def _error_code(response):
+	return _json(response).get("error")
+
+
+def _refusal(response):
+	code = _error_code(response)
+	if code == "callback_unreachable":
+		return _(CALLBACK_UNREACHABLE).format(_json(response).get("detail") or code)
+	return REFUSALS.get(code) or _relay_error(response)
+
+
+def _relay_error(response):
+	body = _json(response)
+	detail = body.get("detail") or body.get("error")
+	if detail:
+		return _("Relay error ({0}): {1}.").format(response.status_code, detail)
+	return _("Relay error ({0}).").format(response.status_code)

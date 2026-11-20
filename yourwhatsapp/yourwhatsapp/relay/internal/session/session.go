@@ -3,6 +3,8 @@ package session
 import (
 	"context"
 	"encoding/base64"
+	"errors"
+	"fmt"
 	"log/slog"
 	"sync"
 	"time"
@@ -39,12 +41,24 @@ const (
 	frappeDisconnected = "Disconnected"
 )
 
+// Reasons a Disconnected push carries; each needs the admin to act.
+const (
+	reasonClientOutdated = "client outdated"
+	reasonLoggedOut      = "logged out"
+	reasonStreamReplaced = "another client took over this number"
+)
+
+// account_event events besides StatusTempBanned.
+const eventClientOutdated = "client_outdated"
+
 const (
 	numberCacheTTL   = 24 * time.Hour
 	downloadTimeout  = 2 * time.Minute
 	sendTimeout      = 2 * time.Minute
 	callbackTimeout  = 10 * time.Second
 	unknownBanExpiry = time.Hour
+
+	unconfirmedReason = "send not confirmed by WhatsApp; may have been delivered"
 )
 
 type statusPayload struct {
@@ -59,12 +73,14 @@ type qrPayload struct {
 	SessionID string `json:"session_id"`
 	QRBase64  string `json:"qr_base64,omitempty"`
 	Status    string `json:"status,omitempty"`
+	// Reason says why a Disconnected needs the admin (Frappe shows it in the alert).
+	Reason string `json:"reason,omitempty"`
 }
 
 type accountEventPayload struct {
 	SessionID string `json:"session_id"`
 	Event     string `json:"event"`
-	Until     string `json:"until"`
+	Until     string `json:"until,omitempty"`
 }
 
 type numberEntry struct {
@@ -96,6 +112,17 @@ type Session struct {
 	banUntil time.Time
 	stopBan  func() bool
 	numbers  map[string]numberEntry
+
+	// Reconnect loop and disconnect grace period (reconnect.go). A *Gen
+	// counter tells a timer that fired after being replaced to do nothing.
+	retryStop    func() bool
+	retryGen     int
+	retryAttempt int
+	downStop     func() bool
+	downGen      int
+	downReported bool
+	// autoReconnecting: whatsmeow's own loop owns the socket (after a drop).
+	autoReconnecting bool
 }
 
 func (s *Session) Status() string {
@@ -138,11 +165,10 @@ func (s *Session) stopBanTimer() {
 	}
 }
 
-// connect dials a paired device; Connected arrives later as an event.
+// connect dials a paired device; Connected arrives later as an event. A
+// failed dial is retried in the background (reconnect.go).
 func (s *Session) connect() (string, error) {
-	s.setStatus(StatusConnecting)
-	if err := s.client.Connect(); err != nil {
-		s.setStatus(StatusDisconnected)
+	if err := s.dial(); err != nil {
 		return StatusDisconnected, err
 	}
 	return s.Status(), nil
@@ -244,6 +270,10 @@ func (s *Session) pushStatus(status string) {
 	s.callback(outbox.MethodQR, qrPayload{SessionID: s.id, Status: status})
 }
 
+func (s *Session) pushDisconnected(reason string) {
+	s.callback(outbox.MethodQR, qrPayload{SessionID: s.id, Status: frappeDisconnected, Reason: reason})
+}
+
 // callback hands a payload to the outbox. Payloads are never logged.
 func (s *Session) callback(method string, payload any) {
 	ctx, cancel := context.WithTimeout(context.Background(), callbackTimeout)
@@ -271,9 +301,9 @@ func (s *Session) handleEvent(evt any) {
 	case *events.ConnectFailure:
 		s.onConnectionLost("connect failure", "reason", int(e.Reason))
 	case *events.ClientOutdated:
-		s.onConnectionLost("client outdated: whatsmeow needs upgrading")
+		s.onClientOutdated()
 	case *events.Disconnected:
-		s.log.Info("socket disconnected; auto-reconnect will retry")
+		s.onSocketDropped()
 	case *events.Message:
 		s.onMessage(e)
 	case *events.Receipt:
@@ -288,6 +318,7 @@ func (s *Session) becomeConnected() {
 	prev := s.status
 	s.status = StatusConnected
 	s.banUntil = time.Time{}
+	s.stopReconnectLocked()
 	s.mu.Unlock()
 	if prev != StatusConnected {
 		s.log.Info("connected")
@@ -312,34 +343,69 @@ func (s *Session) onPairSuccess(e *events.PairSuccess) {
 
 // onLoggedOut: whatsmeow already deletes the device store before emitting it.
 func (s *Session) onLoggedOut(e *events.LoggedOut) {
+	s.becomeLoggedOut("logged out by WhatsApp", "reason", e.Reason.String(), "on_connect", e.OnConnect)
+}
+
+// becomeLoggedOut ends a session whose device WhatsApp no longer accepts.
+func (s *Session) becomeLoggedOut(msg string, attrs ...any) {
 	ctx, cancel := context.WithTimeout(context.Background(), callbackTimeout)
 	defer cancel()
 	if err := s.m.st.SetAccountJID(ctx, s.id, ""); err != nil {
 		s.log.Error("clear jid after logout", "error", err)
 	}
-	s.stopBanTimer()
+	s.stopTimers()
 	s.mu.Lock()
 	s.status = StatusLoggedOut
 	s.jid = types.EmptyJID
 	s.mu.Unlock()
-	s.log.Warn("logged out by WhatsApp", "reason", e.Reason.String(), "on_connect", e.OnConnect)
-	s.pushStatus(frappeDisconnected)
+	s.log.Warn(msg, attrs...)
+	s.pushDisconnected(reasonLoggedOut)
 }
 
 func (s *Session) onStreamReplaced() {
 	s.log.Error("stream replaced: another client connected with this account's keys; not reconnecting")
+	s.stopReconnect()
 	s.client.Disconnect()
 	s.setStatus(StatusDisconnected)
-	s.pushStatus(frappeDisconnected)
+	s.pushDisconnected(reasonStreamReplaced)
 }
 
 // onConnectionLost handles failures after which whatsmeow does not reconnect
-// on its own (LoggedOut and TemporaryBan have their own events). The session
-// becomes disconnected, so the next Start rebuilds it.
+// on its own (LoggedOut and TemporaryBan have their own events): the relay
+// retries, and tells Frappe only if the session stays down (reconnect.go).
 func (s *Session) onConnectionLost(msg string, attrs ...any) {
-	s.log.Error(msg+"; not reconnecting", attrs...)
-	if prev := s.setStatus(StatusDisconnected); prev != StatusDisconnected {
-		s.pushStatus(frappeDisconnected)
+	s.log.Error(msg, attrs...)
+	s.mu.Lock()
+	s.status = StatusDisconnected
+	s.autoReconnecting = false
+	s.mu.Unlock()
+	s.armDownTimer()
+	s.scheduleReconnect()
+}
+
+// onClientOutdated: no retry can succeed until whatsmeow is upgraded, so stop
+// and tell Frappe at once.
+func (s *Session) onClientOutdated() {
+	s.log.Error("WhatsApp rejected the client as outdated — upgrade whatsmeow")
+	s.stopReconnect()
+	s.client.Disconnect()
+	s.setStatus(StatusDisconnected)
+	s.pushDisconnected(reasonClientOutdated)
+	s.callback(outbox.MethodAccountEvent, accountEventPayload{SessionID: s.id, Event: eventClientOutdated})
+}
+
+// onSocketDropped: whatsmeow auto-reconnects a dropped socket itself; Frappe
+// is told only if that takes longer than the grace period.
+func (s *Session) onSocketDropped() {
+	s.log.Info("socket disconnected; auto-reconnect will retry")
+	s.mu.Lock()
+	dropped := s.status == StatusConnected || s.status == StatusConnecting
+	if dropped {
+		s.autoReconnecting = true
+	}
+	s.mu.Unlock()
+	if dropped {
+		s.armDownTimer()
 	}
 }
 
@@ -349,7 +415,7 @@ func (s *Session) onTemporaryBan(e *events.TemporaryBan) {
 		wait = unknownBanExpiry
 	}
 	until := s.m.now().Add(wait).UTC()
-	s.stopBanTimer()
+	s.stopTimers()
 	stop := s.m.afterFunc(wait, s.reconnectAfterBan)
 	s.mu.Lock()
 	s.status = StatusTempBanned
@@ -362,7 +428,8 @@ func (s *Session) onTemporaryBan(e *events.TemporaryBan) {
 	})
 }
 
-// reconnectAfterBan runs when the ban expires; Connected then pushes Active.
+// reconnectAfterBan runs when the ban expires; Connected then pushes Active,
+// and a failed dial joins the reconnect loop.
 func (s *Session) reconnectAfterBan() {
 	unlock := s.m.lockID(s.id)
 	defer unlock()
@@ -370,10 +437,8 @@ func (s *Session) reconnectAfterBan() {
 		return
 	}
 	s.log.Info("ban expired; reconnecting")
-	if err := s.client.Connect(); err != nil {
+	if err := s.dial(); err != nil {
 		s.log.Error("reconnect after ban", "error", err)
-		s.setStatus(StatusDisconnected)
-		s.pushStatus(frappeDisconnected)
 	}
 }
 
@@ -383,17 +448,50 @@ func (s *Session) onMessage(e *events.Message) {
 		return
 	}
 	if media != nil {
-		ctx, cancel := context.WithTimeout(s.ctx, downloadTimeout)
-		data, err := s.client.Download(ctx, media)
-		cancel()
-		if err != nil {
-			s.log.Warn("inbound media download failed; delivering without media", "message_id", p.MessageID, "error", err)
-			p.MediaMimetype, p.MediaFilename = "", ""
-		} else {
-			p.MediaBase64 = base64.StdEncoding.EncodeToString(data)
-		}
+		s.attachMedia(&p, media)
 	}
 	s.callback(outbox.MethodInbound, p)
+}
+
+// attachMedia downloads inbound media into p. Media over MEDIA_MAX_BYTES (by
+// its declared size, or by the downloaded size when none is declared) is
+// replaced by a note in the text so the message itself still arrives.
+func (s *Session) attachMedia(p *convert.InboundPayload, media whatsmeow.DownloadableMessage) {
+	if sized, ok := media.(interface{ GetFileLength() uint64 }); ok && s.overMediaCap(int64(sized.GetFileLength())) {
+		s.dropOversizeMedia(p, int64(sized.GetFileLength()))
+		return
+	}
+	ctx, cancel := context.WithTimeout(s.ctx, downloadTimeout)
+	data, err := s.client.Download(ctx, media)
+	cancel()
+	switch {
+	case err != nil:
+		s.log.Warn("inbound media download failed; delivering without media", "message_id", p.MessageID, "error", err)
+		p.MediaMimetype, p.MediaFilename = "", ""
+	case s.overMediaCap(int64(len(data))):
+		s.dropOversizeMedia(p, int64(len(data)))
+	default:
+		p.MediaBase64 = base64.StdEncoding.EncodeToString(data)
+	}
+}
+
+func (s *Session) overMediaCap(size int64) bool {
+	limit := s.m.cfg.MediaMaxBytes
+	return limit > 0 && size > limit
+}
+
+func (s *Session) dropOversizeMedia(p *convert.InboundPayload, size int64) {
+	s.log.Warn("inbound media over MEDIA_MAX_BYTES; delivering without media", "message_id", p.MessageID, "size", size)
+	what := p.ContentType
+	if p.ContentType == "document" && p.MediaFilename != "" {
+		what = p.MediaFilename
+	}
+	note := fmt.Sprintf("[attachment too large: %s, %.1f MB]", what, float64(size)/(1<<20))
+	if p.Message != "" {
+		note = p.Message + "\n" + note
+	}
+	p.ContentType, p.Message = "text", note
+	p.MediaMimetype, p.MediaFilename = "", ""
 }
 
 func (s *Session) resolvePN(lid types.JID) (types.JID, bool) {
@@ -431,6 +529,8 @@ func (s *Session) sendBlocker() (code, detail string) {
 	case status == StatusTempBanned:
 		return CodeTempBanned, "temporarily banned until " + until.Format(time.RFC3339)
 	case status != StatusConnected || s.client == nil || !s.client.IsConnected():
+		// Frappe matches "session is not_started" / "session is logged_out"
+		// (relay_client.SESSION_DOWN); pinned by TestSessionDownDetails.
 		return CodeSessionUnavailable, "session is " + status
 	}
 	return "", ""
@@ -469,13 +569,15 @@ func (s *Session) deliver(job *sendJob) {
 	ctx, cancel := context.WithTimeout(context.Background(), sendTimeout)
 	defer cancel()
 
-	s.presence(ctx, job.to, types.ChatPresenceComposing)
-	s.queue.sleep(typingDelay(job.text))
-	if s.queue.isStopped() { // paused, logged out or shutting down mid-typing
-		s.finishFailed(job, CodeSessionUnavailable, "session stopped")
-		return
+	if !job.isReaction() {
+		s.presence(ctx, job.to, types.ChatPresenceComposing)
+		s.queue.sleep(typingDelay(job.text))
+		if s.queue.isStopped() { // paused, logged out or shutting down mid-typing
+			s.finishFailed(job, CodeSessionUnavailable, "session stopped")
+			return
+		}
+		s.presence(ctx, job.to, types.ChatPresencePaused)
 	}
-	s.presence(ctx, job.to, types.ChatPresencePaused)
 
 	msg, err := s.buildMessage(ctx, job)
 	if err != nil {
@@ -484,12 +586,30 @@ func (s *Session) deliver(job *sendJob) {
 	}
 	s.sendMu.Lock()
 	defer s.sendMu.Unlock()
-	resp, err := s.client.SendMessage(ctx, job.to, msg)
-	if err != nil {
+	// The id is fixed up front so an unconfirmed send can still be matched
+	// to its receipts.
+	id := s.client.GenerateMessageID()
+	resp, err := s.client.SendMessage(ctx, job.to, msg, whatsmeow.SendRequestExtra{ID: id})
+	switch {
+	case err == nil:
+		s.finishSent(job, resp.ID)
+	case sendUnconfirmed(err):
+		s.finishUnconfirmed(job, id, err)
+	default:
 		s.finishFailed(job, store.ErrCodeSendFailed, err.Error())
-		return
 	}
-	s.finishSent(job, resp.ID)
+}
+
+// sendUnconfirmed reports whether a SendMessage error can come after the
+// message node was written (whatsmeow send.go at the pinned version: waiting
+// for the server ack timed out or was cancelled, or the socket dropped and
+// the retried frame got no answer). Failing over would risk a duplicate.
+func sendUnconfirmed(err error) bool {
+	var disconnected *whatsmeow.DisconnectedError
+	return errors.Is(err, whatsmeow.ErrMessageTimedOut) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled) ||
+		errors.As(err, &disconnected)
 }
 
 func typingDelay(text string) time.Duration {
@@ -503,14 +623,49 @@ func (s *Session) presence(ctx context.Context, to types.JID, state types.ChatPr
 }
 
 func (s *Session) buildMessage(ctx context.Context, job *sendJob) (*waE2E.Message, error) {
+	if job.isReaction() {
+		return s.client.BuildReaction(job.to, s.targetAuthor(job), job.replyToID, job.text), nil
+	}
+	reply := convert.ReplyContext(job.replyToID, s.quoteParticipant(job).String(), job.replyText)
 	if job.media == nil {
-		return convert.TextMessage(job.text), nil
+		return convert.WithReply(convert.TextMessage(job.text), reply), nil
 	}
 	up, err := s.client.Upload(ctx, job.media, convert.ContentToMediaType(job.contentType))
 	if err != nil {
 		return nil, err
 	}
-	return convert.BuildMediaMessage(job.contentType, job.text, job.mimetype, job.filename, up), nil
+	return convert.WithReply(convert.BuildMediaMessage(job.contentType, job.text, job.mimetype, job.filename, up), reply), nil
+}
+
+// targetAuthor is who wrote the reacted-to message (spec §8.3): this session
+// for one of ours (Frappe pins a reaction to the target's account), else the
+// customer the job goes to.
+func (s *Session) targetAuthor(job *sendJob) types.JID {
+	if job.replyFromMe {
+		return s.ownJIDFor(job.to)
+	}
+	return job.to
+}
+
+// quoteParticipant is who wrote the quoted message: for one of ours, the
+// number Frappe says sent it (rotation may reply from another), else as
+// targetAuthor.
+func (s *Session) quoteParticipant(job *sendJob) types.JID {
+	if job.replyFromMe && job.replyParticipant != "" {
+		return types.NewJID(job.replyParticipant, types.DefaultUserServer)
+	}
+	return s.targetAuthor(job)
+}
+
+// ownJIDFor is this session's identity in chat: its LID in a LID chat when
+// known, else its phone JID.
+func (s *Session) ownJIDFor(chat types.JID) types.JID {
+	if chat.Server == types.HiddenUserServer {
+		if lid := s.client.OwnLID(); !lid.IsEmpty() {
+			return lid.ToNonAD()
+		}
+	}
+	return s.client.OwnJID().ToNonAD()
 }
 
 func (s *Session) finishSent(job *sendJob, messageID string) {
@@ -524,6 +679,26 @@ func (s *Session) finishSent(job *sendJob, messageID string) {
 		return
 	}
 	s.callback(outbox.MethodStatus, statusPayload{LocalMessageID: job.localID, MessageID: messageID, Status: "Sent"})
+}
+
+// finishUnconfirmed reports a send of unknown outcome as Failed with
+// send_unconfirmed and its message id; Frappe does not fail it over, and a
+// later receipt for the id lifts the status.
+func (s *Session) finishUnconfirmed(job *sendJob, messageID string, sendErr error) {
+	ctx, cancel := context.WithTimeout(context.Background(), callbackTimeout)
+	defer cancel()
+	ok, err := s.m.st.MarkUnconfirmed(ctx, job.localID, s.id, messageID)
+	if err != nil {
+		s.log.Error("mark send unconfirmed", "local_message_id", job.localID, "error", err)
+	} else if !ok {
+		s.log.Warn("send result ignored: reservation no longer queued on this session", "local_message_id", job.localID)
+		return
+	}
+	s.log.Warn("send unconfirmed", "local_message_id", job.localID, "message_id", messageID, "error", sendErr)
+	s.callback(outbox.MethodStatus, statusPayload{
+		LocalMessageID: job.localID, MessageID: messageID, Status: "Failed",
+		ErrorCode: store.ErrCodeSendUnconfirmed, ErrorReason: unconfirmedReason,
+	})
 }
 
 func (s *Session) finishFailed(job *sendJob, code, reason string) {

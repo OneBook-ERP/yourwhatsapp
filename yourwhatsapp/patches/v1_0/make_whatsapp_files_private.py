@@ -47,4 +47,6 @@ def _delete_qr_files():
 	for name in frappe.get_all("File", filters={"attached_to_doctype": "WhatsApp Account"}, pluck="name"):
 		frappe.delete_doc("File", name, ignore_permissions=True, delete_permanently=True)
 
-	frappe.db.set_value("WhatsApp Account", {"qr_code": ["is", "set"]}, "qr_code", None, update_modified=False)
+	frappe.db.set_value(
+		"WhatsApp Account", {"qr_code": ["is", "set"]}, "qr_code", None, update_modified=False
+	)

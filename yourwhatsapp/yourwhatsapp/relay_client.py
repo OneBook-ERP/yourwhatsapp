@@ -4,11 +4,36 @@ import time
 
 import frappe
 import requests
+from frappe.utils import add_to_date, cint, now_datetime
 
-from yourwhatsapp.yourwhatsapp.routing import mark_rate_limited, pick_account, to_system_datetime
+from yourwhatsapp.yourwhatsapp.doctype.whatsapp_message.whatsapp_message import (
+	MEDIA_CONTENT_TYPES,
+	reply_target,
+)
+from yourwhatsapp.yourwhatsapp.routing import (
+	mark_disconnected,
+	mark_rate_limited,
+	normalize_number,
+	pick_account,
+	to_system_datetime,
+)
+from yourwhatsapp.yourwhatsapp.templating import UnresolvedPlaceholders, render
 
 DISPATCH_BUDGET_SECONDS = 240
 TIMEOUT = 30  # the relay only queues the send, so a slow answer means trouble
+SESSION_STATUS_TIMEOUT = 5
+SEND_METHOD = "yourwhatsapp.yourwhatsapp.relay_client.send_message"
+# When no account could be reached at all (relay down or restarting), the
+# message is parked Queued and re-dispatched after these delays; then Failed.
+RELAY_RETRY_MINUTES = (1, 2, 5, 10, 20)
+# Async error_code for sends a relay restart lost; retried on the same account.
+RELAY_RESTARTED = "relay_restarted"
+# A 409 session_unavailable whose detail means the relay has no live session
+# for the account (as opposed to a transient state such as a full queue). The
+# relay's exact details ("session is not running", "session is not_started",
+# "session is logged_out") are pinned by Go's TestSessionDownDetails.
+SESSION_DOWN = re.compile(r"not running|not[_ ]started|logged[_ ]out")
+TARGET_GONE = "The original message no longer exists"
 
 
 def relay_settings():
@@ -16,6 +41,19 @@ def relay_settings():
 	if not settings.relay_base_url:
 		raise RelayNotConfigured("WhatsApp Settings: Relay Base URL is not configured")
 	return settings.relay_base_url.rstrip("/"), settings.get_password("relay_api_key")
+
+
+def session_status(session_id: str, timeout: float = SESSION_STATUS_TIMEOUT) -> str | None:
+	"""The relay's status for a session (connected, disconnected, ...). Raises
+	RelayNotConfigured, or requests' exceptions when the relay can't answer."""
+	base_url, api_key = relay_settings()
+	response = requests.get(
+		f"{base_url}/session/{session_id}/status",
+		headers={"x-api-key": api_key},
+		timeout=timeout,
+	)
+	response.raise_for_status()
+	return response.json().get("status")
 
 
 def _attach_payload(doc):
@@ -45,20 +83,56 @@ def _attach_payload(doc):
 	}
 
 
+def _reply_payload(doc, sending_account: str):
+	"""What the relay needs to quote (or react to) the target. A target Frappe
+	doesn't have sends a reply as a plain message; a reaction can't get here
+	without one (WhatsAppMessage refuses it at insert)."""
+	target = reply_target(doc.reply_to_message_id, doc.to, in_chat_only=_is_reaction(doc))
+	if not target:
+		return {}
+	from_me = target.type == "Outgoing"
+	payload = {
+		"reply_to_message_id": doc.reply_to_message_id,
+		"reply_from_me": from_me,
+		"reply_text": _quoted_text(target),
+	}
+	if from_me and target.whatsapp_account != sending_account:
+		# Rotation replies from another number than the one that sent the
+		# quote. From the same one the relay uses its own JID (or LID).
+		phone = normalize_number(
+			frappe.db.get_value("WhatsApp Account", target.whatsapp_account, "phone_number")
+		)
+		if phone:
+			payload["reply_participant"] = phone
+		else:
+			# Accepted: the relay falls back to the sending number's own JID, so
+			# WhatsApp may attribute the quote to the wrong number of ours.
+			frappe.logger("yourwhatsapp").warning(
+				f"reply {doc.name}: quoted account {target.whatsapp_account} has no phone number; "
+				"the quote may be attributed to the sending number"
+			)
+	return payload
+
+
+def _quoted_text(target) -> str:
+	# CRM stores an uncaptioned attachment's URL as the message text.
+	caption = "" if target.message == target.attach else (target.message or "")
+	if caption or target.content_type not in MEDIA_CONTENT_TYPES:
+		return caption
+	return f"[{target.content_type}]"
+
+
 class RelayNotConfigured(Exception):
 	pass
 
 
 def _render_message(doc):
+	"""Raises UnresolvedPlaceholders rather than send a literal {{n}}."""
 	if not doc.use_template or not doc.template:
 		return doc.message
 
-	template_doc = frappe.get_doc("WhatsApp Templates", doc.template)
-	text = template_doc.template
-	if doc.template_parameters:
-		for i, param in enumerate(json.loads(doc.template_parameters), start=1):
-			text = text.replace("{{" + str(i) + "}}", str(param))
-	return text
+	text = frappe.db.get_value("WhatsApp Templates", doc.template, "template")
+	return render(text, json.loads(doc.template_parameters or "[]"))
 
 
 def send_message(message_name: str):
@@ -75,16 +149,32 @@ def send_message(message_name: str):
 
 def handle_async_failure(message_name: str, error_code: str):
 	"""Re-dispatch a message the relay accepted but then failed to send (api.message_status enqueues this)."""
-	# Row lock: attempted_accounts is read-modify-written below.
+	# Row lock: attempted_accounts is read-modify-written below. Note that
+	# adopt_pending_key (reached via a 401 in dispatch) commits, which also
+	# commits this dispatch's own message writes and releases this lock.
 	doc = frappe.get_doc("WhatsApp Message", message_name, for_update=True)
 	if doc.type != "Outgoing" or doc.status != "Failed":
+		return
+
+	if error_code == RELAY_RESTARTED:
+		# The account is fine, the relay just lost the queued send: retry it
+		# there later instead of failing over (it may be the only number).
+		_retry_later(doc, f"Relay error: {error_code}")
+		return
+	if _is_reaction(doc):
 		return
 
 	_remember_attempt(doc, doc.whatsapp_account)
 	# message_status only applies a Failed callback while the message is Queued.
 	doc.db_set("status", "Queued")
-	if _switch_account(doc, f"Relay error: {error_code}"):
+	if _switch_account(doc, f"Relay error: {error_code}", append=True):
 		_dispatch(doc)
+
+
+def _is_reaction(doc) -> bool:
+	# Only the target's number can send a reaction (WhatsAppMessage pins it):
+	# it is retried there or failed, never moved to another account.
+	return doc.content_type == "reaction"
 
 
 def increment_daily_count(account: str):
@@ -111,14 +201,39 @@ def _remember_attempt(doc, account: str):
 		doc.db_set("attempted_accounts", json.dumps(attempted))
 
 
-def _switch_account(doc, reason: str) -> bool:
-	"""Move the message to an account not yet tried; Failed with `reason` when none is left."""
-	next_account = pick_account(exclude=_attempted_accounts(doc))
-	if not next_account:
-		_fail(doc, f"{reason}; no other WhatsApp Account available")
+def _switch_account(doc, reason: str, relay_unavailable: bool = False, append: bool = False) -> bool:
+	"""Move the message to an account not yet tried. When none is left it is
+	parked for a later retry if the relay itself was unavailable, else Failed
+	with `reason` (appended to the relay's own reason when `append`)."""
+	next_account = pick_account(exclude=_attempted_accounts(doc), recipient=doc.to)
+	if next_account:
+		doc.db_set("whatsapp_account", next_account)
+		return True
+	if relay_unavailable:
+		_retry_later(doc, reason)
 		return False
-	doc.db_set("whatsapp_account", next_account)
-	return True
+	reason = f"{reason}; no other WhatsApp Account available"
+	_fail(doc, f"{doc.error_reason}; {reason}" if append and doc.error_reason else reason)
+	return False
+
+
+def _retry_later(doc, reason: str):
+	"""No account could be reached: park the message Queued and let
+	tasks.retry_relay_unavailable_messages re-dispatch it (Frappe's enqueue has
+	no delay), with every account eligible again."""
+	retries = cint(doc.relay_retry_count)
+	if retries >= len(RELAY_RETRY_MINUTES):
+		doc.db_set("next_retry_at", None)
+		_fail(doc, f"relay unavailable after {retries} retries; last error: {reason}")
+		return
+	doc.db_set(
+		{
+			"status": "Queued",
+			"attempted_accounts": None,
+			"relay_retry_count": retries + 1,
+			"next_retry_at": add_to_date(now_datetime(), minutes=RELAY_RETRY_MINUTES[retries]),
+		}
+	)
 
 
 def _to_is_lid(doc) -> bool:
@@ -133,16 +248,17 @@ def _to_is_lid(doc) -> bool:
 	)
 
 
-def _post(doc, account, base_url: str, api_key: str):
+def _post(doc, account, base_url: str, api_key: str, message: str):
 	"""POST to the relay; a timeout is retried once on the same account (relay idempotency answers `duplicate`)."""
 	payload = {
 		"session_id": account.session_id,
 		"to": doc.to,
 		"to_is_lid": _to_is_lid(doc),
 		"content_type": doc.content_type,
-		"message": _render_message(doc),
+		"message": message,
 		"local_message_id": doc.name,
 		**_attach_payload(doc),
+		**_reply_payload(doc, account.name),
 	}
 	for attempt in (1, 2):
 		try:
@@ -154,11 +270,39 @@ def _post(doc, account, base_url: str, api_key: str):
 				raise
 
 
+def _adopt_pending_key() -> str | None:
+	from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings.whatsapp_settings import adopt_pending_key
+
+	return adopt_pending_key()
+
+
 def _error_code(response) -> str | None:
 	try:
 		return response.json().get("error")
 	except Exception:
 		return None
+
+
+def _rejection_reason(doc, response, code) -> str:
+	# The relay refuses a reaction without a target id: Frappe found no target row to send.
+	if _is_reaction(doc) and "reply_to_message_id" in _error_detail(response):
+		return TARGET_GONE
+	return f"Relay rejected message: {code}"
+
+
+def _error_detail(response) -> str:
+	try:
+		return response.json().get("detail") or ""
+	except Exception:
+		return ""
+
+
+def _session_down(response) -> bool:
+	try:
+		body = response.json()
+	except Exception:
+		return False
+	return body.get("error") == "session_unavailable" and bool(SESSION_DOWN.search(body.get("detail") or ""))
 
 
 def _ban_expiry(response):
@@ -174,24 +318,40 @@ def _ban_expiry(response):
 def _dispatch(doc):
 	started = time.monotonic()
 	try:
+		message = _render_message(doc)
+	except UnresolvedPlaceholders:
+		_fail(doc, "unresolved template placeholders")
+		return
+	try:
 		base_url, api_key = relay_settings()
 	except RelayNotConfigured as e:
 		_fail(doc, str(e))
 		return
 
 	previous_account = None
+	# Stays True while every account only failed to answer (connection error,
+	# timeout, 409 session_unavailable): the relay as a whole is unavailable.
+	relay_unavailable = True
+	key_adopted = False
 	while True:
 		if previous_account and time.monotonic() - started > DISPATCH_BUDGET_SECONDS:
-			_fail(doc, "relay unreachable; dispatch time budget exhausted")
+			reason = "relay unreachable; dispatch time budget exhausted"
+			if relay_unavailable:
+				_retry_later(doc, reason)
+			else:
+				_fail(doc, reason)
 			return
 		account = frappe.get_doc("WhatsApp Account", doc.whatsapp_account)
 		_remember_attempt(doc, account.name)
 
 		try:
-			response = _post(doc, account, base_url, api_key)
+			response = _post(doc, account, base_url, api_key, message)
 		except requests.exceptions.RequestException as e:
+			if _is_reaction(doc):
+				_retry_later(doc, f"Relay unreachable: {e}")
+				return
 			previous_account = account.name
-			if not _switch_account(doc, f"Relay unreachable: {e}"):
+			if not _switch_account(doc, f"Relay unreachable: {e}", relay_unavailable):
 				return
 			continue
 
@@ -203,12 +363,28 @@ def _dispatch(doc):
 				# The earlier account (e.g. after a timeout) actually holds the send.
 				doc.db_set("whatsapp_account", previous_account)
 			return
+		if status == 401:
+			# This site's key is out of step with the relay, which says nothing
+			# about the message: adopt a pending key the relay takes, else park it.
+			new_key = None if key_adopted else _adopt_pending_key()
+			if new_key:
+				api_key, key_adopted = new_key, True
+				continue
+			_retry_later(doc, "Relay rejected the API key")
+			return
 		code = _error_code(response)
 		if status in (400, 422):
-			_fail(doc, f"Relay rejected message: {code or status}")
+			_fail(doc, _rejection_reason(doc, response, code or status))
 			return
 		if status == 429:
 			mark_rate_limited(account.name, _ban_expiry(response))
+		if status == 409 and _session_down(response):
+			mark_disconnected(account.name)
+		if _is_reaction(doc):
+			_fail(doc, f"Relay error: {code or status}")
+			return
+		if status != 409:
+			relay_unavailable = False
 		previous_account = account.name
-		if not _switch_account(doc, f"Relay error: {code or status}"):
+		if not _switch_account(doc, f"Relay error: {code or status}", relay_unavailable):
 			return

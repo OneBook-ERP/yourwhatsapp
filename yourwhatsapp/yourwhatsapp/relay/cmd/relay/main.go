@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"yourwhatsapp/relay/internal/api"
+	"yourwhatsapp/relay/internal/claim"
 	"yourwhatsapp/relay/internal/config"
 	"yourwhatsapp/relay/internal/outbox"
 	"yourwhatsapp/relay/internal/session"
@@ -24,7 +25,13 @@ import (
 const (
 	httpShutdownTimeout    = 10 * time.Second
 	sessionShutdownTimeout = 15 * time.Second
+	// lostSendGrace gives restored sessions time to reconnect before the
+	// sends lost in the restart are failed over.
+	lostSendGrace = 30 * time.Second
 )
+
+// version is stamped at build time: -ldflags "-X main.version=...".
+var version = "dev"
 
 func main() {
 	if len(os.Args) > 1 && os.Args[1] == "healthcheck" {
@@ -51,12 +58,24 @@ func run(log *slog.Logger) error {
 	}
 	defer st.Close()
 
+	cs, err := claim.New(st, cfg, time.Now, log)
+	if err != nil {
+		return fmt.Errorf("load relay identity: %w", err)
+	}
+	log.Info("relay identity", "mode", cs.Mode(), "version", version)
+	logStartupConfig(log, cfg)
+
 	workerCtx, cancelWorker := context.WithCancel(context.Background())
 	workerDone := make(chan struct{})
-	worker := outbox.NewWorker(st, outbox.NewFrappePoster(cfg.FrappeBaseURL, cfg.FrappeSiteName, cfg.APIKey), log)
+	worker := outbox.NewWorker(st, outbox.NewFrappePoster(cs.Target), log)
+	claimed := claimedSignal(cs)
 	go func() {
 		defer close(workerDone)
-		worker.Run(workerCtx)
+		select {
+		case <-claimed:
+			worker.Run(workerCtx)
+		case <-workerCtx.Done():
+		}
 	}()
 
 	enqueue := func(ctx context.Context, method string, payload any) error {
@@ -67,17 +86,20 @@ func run(log *slog.Logger) error {
 		return err
 	}
 	manager := session.NewManager(st, enqueue, session.NewWhatsmeowClient, cfg, log)
-	if err := manager.RestoreAll(ctx); err != nil {
-		log.Error("restore sessions", "error", err)
-	}
+	restoreWhenClaimed(ctx, cs, manager, log)
 
 	srv := &http.Server{
 		Addr:              net.JoinHostPort(cfg.Host, strconv.Itoa(cfg.Port)),
-		Handler:           api.NewHandler(manager, st, cfg.APIKey, log),
+		Handler:           api.NewHandler(manager, st, cs, log, version, outbox.Ping, worker.Notify),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	ln, err := net.Listen("tcp", srv.Addr)
+	if err != nil {
+		shutdown(log, srv, manager, cancelWorker, workerDone)
+		return fmt.Errorf("listen: %w", err)
+	}
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- srv.ListenAndServe() }()
+	go func() { serveErr <- srv.Serve(ln) }()
 	log.Info("relay listening", "addr", srv.Addr)
 
 	select {
@@ -91,6 +113,55 @@ func run(log *slog.Logger) error {
 	shutdown(log, srv, manager, cancelWorker, workerDone)
 	log.Info("shutdown complete")
 	return nil
+}
+
+// logStartupConfig logs the effective limits an operator may need to match
+// elsewhere (nginx client_max_body_size against MEDIA_MAX_BYTES).
+func logStartupConfig(log *slog.Logger, cfg config.Config) {
+	log.Info("relay config", "media_max_bytes", cfg.MediaMaxBytes)
+}
+
+// restorer is the part of *session.Manager that brings sessions back at boot.
+type restorer interface {
+	RestoreAll(ctx context.Context) error
+	FailLostSendsAfter(grace time.Duration)
+}
+
+// restoreWhenClaimed restores sessions now when the relay has an identity
+// (before it serves, as always), or in the background once POST /claim succeeds.
+func restoreWhenClaimed(ctx context.Context, cs *claim.State, m restorer, log *slog.Logger) {
+	if cs.Mode() != claim.ModeUnclaimed {
+		restoreSessions(ctx, m, log)
+		return
+	}
+	log.Info("relay unclaimed: no sessions or callbacks until POST /claim")
+	cs.OnClaimed(func() { go restoreSessions(ctx, m, log) })
+}
+
+// restoreSessions restarts every paired session and arms the lost-send
+// failover, whose grace gives the restored sessions time to reconnect.
+// A claim that lands during shutdown restores nothing.
+func restoreSessions(ctx context.Context, m restorer, log *slog.Logger) {
+	if ctx.Err() != nil {
+		return
+	}
+	if err := m.RestoreAll(ctx); err != nil {
+		log.Error("restore sessions", "error", err)
+	}
+	m.FailLostSendsAfter(lostSendGrace)
+}
+
+// claimedSignal is closed once the relay has an identity: at once in env or
+// claimed mode, else after POST /claim. Registered before the server listens,
+// so no claim can slip between the mode check and the hook.
+func claimedSignal(cs *claim.State) <-chan struct{} {
+	ch := make(chan struct{})
+	if cs.Mode() != claim.ModeUnclaimed {
+		close(ch)
+		return ch
+	}
+	cs.OnClaimed(func() { close(ch) })
+	return ch
 }
 
 func shutdown(log *slog.Logger, srv *http.Server, m *session.Manager, cancelWorker context.CancelFunc, workerDone <-chan struct{}) {

@@ -222,6 +222,56 @@ func TestInboundDownloadFailureStillDelivers(t *testing.T) {
 	}
 }
 
+// Media over MEDIA_MAX_BYTES is not downloaded (declared size) or not
+// forwarded (undeclared size); the message still arrives with a note.
+func TestInboundMediaOverCapDeliversNote(t *testing.T) {
+	const capBytes = 10 << 20
+	declared := inboundImage("BIG1")
+	declared.Message.ImageMessage.FileLength = proto.Uint64(20 << 20)
+	undeclared := inboundImage("BIG2")
+	doc := inboundImage("BIG3")
+	doc.Message = &waE2E.Message{DocumentMessage: &waE2E.DocumentMessage{
+		Mimetype: proto.String("application/pdf"), FileName: proto.String("scan.pdf"), FileLength: proto.Uint64(31457280),
+	}}
+	cases := []struct {
+		name          string
+		evt           *events.Message
+		download      []byte
+		wantDownloads int
+		wantMessage   string
+	}{
+		{"declared size", declared, nil, 0, "look\n[attachment too large: image, 20.0 MB]"},
+		{"undeclared size", undeclared, make([]byte, capBytes+1), 1, "look\n[attachment too large: image, 10.0 MB]"},
+		{"document without caption", doc, nil, 0, "[attachment too large: scan.pdf, 30.0 MB]"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h := newHarness(t)
+			h.m.cfg.MediaMaxBytes = capBytes
+			fc := h.connected("A", testJID)
+			fc.download = c.download
+			fc.emit(c.evt)
+
+			in := h.callbacks(outbox.MethodInbound)
+			if len(in) != 1 {
+				t.Fatalf("inbound = %v", in)
+			}
+			p := in[0]
+			if p["message"] != c.wantMessage || p["content_type"] != "text" {
+				t.Errorf("message = %q, content_type = %v", p["message"], p["content_type"])
+			}
+			for _, k := range []string{"media_base64", "media_mimetype", "media_filename"} {
+				if _, has := p[k]; has {
+					t.Errorf("%s present", k)
+				}
+			}
+			if fc.downloads != c.wantDownloads {
+				t.Errorf("downloads = %d, want %d", fc.downloads, c.wantDownloads)
+			}
+		})
+	}
+}
+
 func TestReceiptEnqueuesStatus(t *testing.T) {
 	h := newHarness(t)
 	fc := h.connected("A", testJID)
@@ -243,6 +293,43 @@ func TestReceiptEnqueuesStatus(t *testing.T) {
 	for i, id := range []string{"W1", "W2"} {
 		if st[i]["message_id"] != id || st[i]["status"] != "Read" {
 			t.Errorf("callback %d = %v", i, st[i])
+		}
+	}
+}
+
+// A Disconnected push says why when the admin has something to act on;
+// Frappe puts the reason in the health alert.
+func TestDisconnectedPushCarriesReason(t *testing.T) {
+	cases := []struct {
+		name  string
+		event any
+		want  string
+	}{
+		{"client outdated", &events.ClientOutdated{}, "client outdated"},
+		{"logged out", &events.LoggedOut{Reason: events.ConnectFailureLoggedOut}, "logged out"},
+		{"stream replaced", &events.StreamReplaced{}, "another client took over this number"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			fc := h.connected("A", testJID)
+			fc.emit(tc.event)
+			pushes := h.callbacks(outbox.MethodQR)
+			last := pushes[len(pushes)-1]
+			if last["status"] != "Disconnected" || last["reason"] != tc.want {
+				t.Errorf("last push = %v, want Disconnected with reason %q", last, tc.want)
+			}
+		})
+	}
+}
+
+// A grace-period Disconnected carries no reason: the alert says only Disconnected.
+func TestConnectedPushHasNoReason(t *testing.T) {
+	h := newHarness(t)
+	h.connected("A", testJID)
+	for _, p := range h.callbacks(outbox.MethodQR) {
+		if _, has := p["reason"]; has {
+			t.Errorf("push carries a reason: %v", p)
 		}
 	}
 }
