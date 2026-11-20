@@ -26,7 +26,7 @@ In frappe_docker, list the apps in `apps.json`. Use the branch you deploy.
 [
   {"url": "https://github.com/frappe/erpnext", "branch": "version-16"},
   {"url": "https://github.com/frappe/crm", "branch": "main"},
-  {"url": "https://github.com/OneBook-ERP/yourwhatsapp", "branch": "version-16"}
+  {"url": "https://github.com/OneBook-ERP/yourwhatsapp", "branch": "<release tag, e.g. v1.2.0>"}
 ]
 ```
 
@@ -37,19 +37,16 @@ docker build --build-arg=APPS_JSON_BASE64=$APPS_JSON_BASE64 ... -t <your-frappe-
 
 Check the exact build command and the app branches against your frappe_docker version.
 
-### 2. Build the relay image
+### 2. The relay image (nothing to build)
 
-```bash
-cd apps/yourwhatsapp/yourwhatsapp/yourwhatsapp/relay
-docker build --build-arg VERSION=<tag> -t ghcr.io/<org>/yourwhatsapp-relay:<tag> .
-docker push ghcr.io/<org>/yourwhatsapp-relay:<tag>
-```
+The relay is pre-built by GitHub Actions and published as a public image, pulled like redis or mariadb: `ghcr.io/onebook-erp/yourwhatsapp-relay:<tag>`. Use the same release tag as yourwhatsapp in `apps.json`. To build it yourself (forks, testing), see `DEPLOYMENT.md` §2.
 
 ### 3. Start the stack with the relay
 
 ```bash
 # Keep this token: you type it into WhatsApp Settings in step 5.
 export RELAY_BOOTSTRAP_TOKEN=$(python3 -c "import secrets;print(secrets.token_urlsafe(32))")
+export RELAY_VERSION=<release tag>   # same tag as yourwhatsapp in apps.json
 
 docker compose -f compose.yaml \
   -f overrides/compose.mariadb.yaml -f overrides/compose.redis.yaml \

@@ -9,9 +9,11 @@ Add the app to the `apps.json` you feed to frappe_docker's image build:
 ```json
 [
   {"url": "https://github.com/frappe/crm", "branch": "version-16"},
-  {"url": "https://github.com/OneBook-ERP/yourwhatsapp", "branch": "version-16"}
+  {"url": "https://github.com/OneBook-ERP/yourwhatsapp", "branch": "v1.2.0"}
 ]
 ```
+
+Pin yourwhatsapp to a **release tag** (frappe_docker's `branch` field accepts tags), and use the same tag for the relay image in step 2.
 
 ```bash
 export APPS_JSON_BASE64=$(base64 -w 0 apps.json)
@@ -22,27 +24,38 @@ docker build --build-arg=APPS_JSON_BASE64=$APPS_JSON_BASE64 \
 
 Then `bench --site <site> install-app yourwhatsapp` (frappe_docker: `docker compose exec backend bench --site <site> install-app yourwhatsapp`). If your host cannot add containers (e.g. Frappe Cloud), see section 9.
 
-## 2. Build and push the relay image
+## 2. The relay image: pulled, not built
+
+You don't build the relay on the server. GitHub Actions (`.github/workflows/relay-image.yml`) builds it for every release tag and publishes a **public** image, so the server pulls it like redis or mariadb:
+
+```
+ghcr.io/onebook-erp/yourwhatsapp-relay:<tag>      # linux/amd64 + linux/arm64
+```
+
+The image is a static Go binary on `gcr.io/distroless/static:nonroot` (about 32 MB), listening on 8800, with its data in `/data`. It reports its tag in `/info` and the Settings relay panel. There is no `latest`: always pin the release tag, the same one as yourwhatsapp in `apps.json`.
+
+Building it yourself is only for forks or testing:
 
 ```bash
 cd apps/yourwhatsapp/yourwhatsapp/yourwhatsapp/relay
-docker build --build-arg VERSION=<tag> -t ghcr.io/<org>/yourwhatsapp-relay:<tag> .
-docker push ghcr.io/<org>/yourwhatsapp-relay:<tag>
+docker build --build-arg VERSION=<tag> -t yourwhatsapp-relay:<tag> .     # add --platform linux/amd64 on an ARM machine for an x86 server
+# then: export RELAY_IMAGE=yourwhatsapp-relay RELAY_VERSION=<tag>
 ```
-
-The image is a static Go binary on `gcr.io/distroless/static:nonroot`, listening on 8800, with its data in `/data`. `VERSION` (e.g. `$(git describe --tags --always)`) is what the Relay Status panel shows; without it the relay reports `dev`. Pin a version tag rather than `latest`.
 
 ## 3. Add the compose override
 
-Copy `yourwhatsapp/yourwhatsapp/relay/compose.whatsapp.yaml` next to your frappe_docker compose files, set the image name (or uncomment `build:`), and add it to the stack:
+frappe_docker does **not** discover the relay by itself: the Frappe image only carries the Python app. You add the relay by passing one extra compose file. Copy `yourwhatsapp/yourwhatsapp/relay/compose.whatsapp.yaml` next to your frappe_docker compose files (it reads everything from env, so you don't edit it) and add it to the command you already use:
 
 ```bash
 # Required in production: only someone holding this token can claim the relay in step 4.
 # Keep it, you need it in step 4. /claim is not throttled, so use a long random value.
 export RELAY_BOOTSTRAP_TOKEN=$(python3 -c "import secrets;print(secrets.token_urlsafe(32))")
+export RELAY_VERSION=v1.2.0          # same release tag as yourwhatsapp in apps.json
 docker compose -f compose.yaml -f overrides/compose.mariadb.yaml -f overrides/compose.redis.yaml \
   -f compose.whatsapp.yaml up -d
 ```
+
+Put `RELAY_BOOTSTRAP_TOKEN` and `RELAY_VERSION` in the same `.env` file as frappe_docker's other variables so every later `docker compose` run picks them up. If you deploy from a generated file (frappe_docker's "gitops" style, `docker compose ... config > prod.yaml`), include `-f compose.whatsapp.yaml` when you generate it.
 
 - `RELAY_BOOTSTRAP_TOKEN` is **required in production**. Without it, whoever reaches the relay port first can claim a fresh relay.
 - No `RELAY_API_KEY` is needed: the relay starts **unclaimed** and is claimed from the Desk in step 4. The callback URL and `Host` header come from the claim. `FRAPPE_BASE_URL` / `FRAPPE_SITE_NAME` are used in env mode only (for that, also `export SITE_NAME=<your site>` before `up`), and setting `RELAY_API_KEY` (commented out in the compose file as legacy/env mode) pins the key in env and disables claiming.
@@ -153,3 +166,20 @@ Managed Frappe hosting (e.g. Frappe Cloud) does not let you add a sidecar contai
 - Put it behind TLS and restrict access (firewall to your Frappe host's IP, or a private network/VPN). The API key is the only other defence.
 - Set the **Callback URL** in WhatsApp Settings to your site's public HTTPS URL, reachable from the relay host, before **Connect Relay**. The site name sent as `Host` is then usually irrelevant. Set `RELAY_BOOTSTRAP_TOKEN`, since the port is reachable from outside the compose network.
 - Publish the port only on the private interface or behind the reverse proxy; the same backup and one-relay-per-volume rules apply.
+
+## Releasing a new version
+
+Each release is one git tag that drives both images, so the app and the relay never drift apart.
+
+1. Merge to the release branch, then tag: `git tag v1.2.0 && git push origin v1.2.0`.
+2. GitHub Actions builds and publishes `ghcr.io/onebook-erp/yourwhatsapp-relay:v1.2.0` (amd64 + arm64). Check the **Relay image** workflow run is green. **First release only:** in GitHub, open the org's Packages → `yourwhatsapp-relay` → Package settings → Change visibility → **Public** (new packages start private, and servers pull without logging in).
+3. On the server:
+   - set yourwhatsapp to `v1.2.0` in `apps.json` and rebuild the Frappe image as usual;
+   - set `RELAY_VERSION=v1.2.0` in the compose `.env`;
+   - `docker compose ... pull && docker compose ... up -d` (same file list as step 3);
+   - `docker compose exec backend bench --site <site> migrate`.
+4. Check WhatsApp Settings → **Test Connection** shows Connected and the new relay version.
+
+Only containers whose image changed are recreated. A release that changes only the app restarts the Frappe containers and leaves the relay (and every linked number) connected; the relay's callback queue covers the moment Frappe is down. A release that changes the relay restarts it gracefully and it restores every number without a rescan.
+
+**Rollback:** set the previous tag in `apps.json` and `RELAY_VERSION`, rebuild/pull, `up -d`. Back up the relay volume (section 6) before upgrading the relay, since a newer relay may add tables to `relay.db`.
