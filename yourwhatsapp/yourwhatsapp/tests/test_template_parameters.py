@@ -93,12 +93,16 @@ class TestTemplateParameters(LiveSafeTestCase):
 		self.assertEqual(resolve("TP Order", "Sales Order", order.name), ["TP-SO-0001", "TP Customer"])
 
 	def test_default_value_used(self):
-		self._template("TP Default", "Hi {{1}} at {{2}}", [(1, "first_name", None), (2, "organization", "your company")])
+		self._template(
+			"TP Default", "Hi {{1}} at {{2}}", [(1, "first_name", None), (2, "organization", "your company")]
+		)
 		lead = self._lead()
 		self.assertEqual(resolve("TP Default", "CRM Lead", lead.name), ["Ana", "your company"])
 
 	def test_missing_value_blocks(self):
-		self._template("TP Missing", "Hi {{1}} at {{2}}", [(1, "first_name", None), (2, "organization", None)])
+		self._template(
+			"TP Missing", "Hi {{1}} at {{2}}", [(1, "first_name", None), (2, "organization", None)]
+		)
 		lead = self._lead()
 		with self.assertRaises(frappe.ValidationError) as ctx:
 			resolve("TP Missing", "CRM Lead", lead.name)
@@ -152,16 +156,28 @@ class TestTemplateParameters(LiveSafeTestCase):
 			with self.subTest(case), self.assertRaises(frappe.ValidationError):
 				self._template(f"TP Invalid {case}", body, rows, for_doctype=for_doctype)
 
-		self._template("TP Valid", "Hi {{1}} {{2}}", [(1, "lead.first_name", None), (2, "name", None)], for_doctype="CRM Deal")
+		self._template(
+			"TP Valid",
+			"Hi {{1}} {{2}}",
+			[(1, "lead.first_name", None), (2, "name", None)],
+			for_doctype="CRM Deal",
+		)
 		self._template("TP Valid Any", "Hi {{1}}", [(1, "anything", None)])
 
 	def test_render_final_check_fails_message(self):
 		self._template("TP Final", "Hi {{1}} at {{2}}", [(1, "first_name", None), (2, "organization", None)])
 		account = frappe.get_doc(
-			{"doctype": "WhatsApp Account", "account_name": "TP Sender", "phone_number": "15550009999", "status": "Active"}
+			{
+				"doctype": "WhatsApp Account",
+				"account_name": "TP Sender",
+				"phone_number": "15550009999",
+				"status": "Active",
+			}
 		).insert(ignore_permissions=True)
 		# Parameters already set skip resolution, as when a caller supplies them.
-		msg = self._outgoing("TP Final", whatsapp_account=account.name, template_parameters=json.dumps(["Ana"]))
+		msg = self._outgoing(
+			"TP Final", whatsapp_account=account.name, template_parameters=json.dumps(["Ana"])
+		)
 		with patch("requests.post") as post:
 			relay_client.send_message(msg.name)
 		post.assert_not_called()
@@ -180,7 +196,9 @@ class TestTemplateParameters(LiveSafeTestCase):
 		self.assertEqual(json.loads(params), ["Dora", "Dora Farms"])
 
 	def test_date_formatting(self):
-		self._template("TP Date", "Closing on {{1}}", [(1, "expected_closure_date", None)], for_doctype="CRM Deal")
+		self._template(
+			"TP Date", "Closing on {{1}}", [(1, "expected_closure_date", None)], for_doctype="CRM Deal"
+		)
 		deal = frappe.get_doc(
 			{"doctype": "CRM Deal", "lead": self._lead().name, "expected_closure_date": "2026-11-05"}
 		).insert(ignore_permissions=True)
@@ -223,7 +241,9 @@ class TestTemplateParameters(LiveSafeTestCase):
 				with self.assertRaises(frappe.ValidationError) as ctx:
 					self._template(f"TP Unsafe {case}", "Hi {{1}}", [(1, field, None)], for_doctype=doctype)
 				self.assertIn("can't be used in templates", str(ctx.exception))
-		self._template("TP User Name", "Hi {{1}}", [(1, "deal_owner.full_name", None)], for_doctype="CRM Deal")
+		self._template(
+			"TP User Name", "Hi {{1}}", [(1, "deal_owner.full_name", None)], for_doctype="CRM Deal"
+		)
 
 	def test_resolve_refuses_unsafe_fields_without_for_doctype(self):
 		deal = frappe.get_doc(
@@ -275,7 +295,9 @@ class TestTemplateParameters(LiveSafeTestCase):
 
 	def test_resolve_needs_read_permission_on_linked_doc(self):
 		self._template("TP Perm Link", "Hi {{1}}", [(1, "lead.first_name", None)], for_doctype="CRM Deal")
-		deal = frappe.get_doc({"doctype": "CRM Deal", "lead": self._lead().name}).insert(ignore_permissions=True)
+		deal = frappe.get_doc({"doctype": "CRM Deal", "lead": self._lead().name}).insert(
+			ignore_permissions=True
+		)
 
 		def deny_leads(doctype=None, ptype="read", doc=None, user=None, **kwargs):
 			return doctype != "CRM Lead"

@@ -1,4 +1,5 @@
 import hmac
+
 import frappe
 from frappe.utils import get_datetime, now_datetime
 
@@ -103,9 +104,13 @@ def _save_inbound_media_or_note(doc, media_base64: str, mimetype: str | None, fi
 		_save_inbound_media(doc.name, media_base64, mimetype, filename)
 	except Exception:
 		frappe.db.rollback(save_point=savepoint)
-		frappe.log_error(title="WhatsApp inbound media not saved", reference_doctype=doc.doctype, reference_name=doc.name)
+		frappe.log_error(
+			title="WhatsApp inbound media not saved", reference_doctype=doc.doctype, reference_name=doc.name
+		)
 		note = "[attachment could not be saved]"
-		frappe.db.set_value(doc.doctype, doc.name, "message", f"{doc.message}\n{note}" if doc.message else note)
+		frappe.db.set_value(
+			doc.doctype, doc.name, "message", f"{doc.message}\n{note}" if doc.message else note
+		)
 
 
 def _save_inbound_media(message_name: str, media_base64: str, mimetype: str | None, filename: str | None):
@@ -336,5 +341,8 @@ def _save_qr_image(account: str, qr_base64: str):
 	# reused File record), so browsers serve the stale cached image instead of
 	# re-fetching the updated content.
 	frappe.db.set_value(
-		"WhatsApp Account", account, "qr_code", f"{file_doc.file_url}?t={int(frappe.utils.now_datetime().timestamp())}"
+		"WhatsApp Account",
+		account,
+		"qr_code",
+		f"{file_doc.file_url}?t={int(frappe.utils.now_datetime().timestamp())}",
 	)

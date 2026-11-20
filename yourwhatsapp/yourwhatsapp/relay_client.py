@@ -6,7 +6,10 @@ import frappe
 import requests
 from frappe.utils import add_to_date, cint, now_datetime
 
-from yourwhatsapp.yourwhatsapp.doctype.whatsapp_message.whatsapp_message import MEDIA_CONTENT_TYPES, reply_target
+from yourwhatsapp.yourwhatsapp.doctype.whatsapp_message.whatsapp_message import (
+	MEDIA_CONTENT_TYPES,
+	reply_target,
+)
 from yourwhatsapp.yourwhatsapp.routing import (
 	mark_disconnected,
 	mark_rate_limited,

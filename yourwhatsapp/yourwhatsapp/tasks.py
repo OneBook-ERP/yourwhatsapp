@@ -103,7 +103,10 @@ def _reconcile(account: str, status: str, relay_status: str | None):
 		if first_seen is None:
 			# Expires so a mark left by an outage long ago doesn't count for a new one.
 			frappe.cache.set_value(key, time.time(), expires_in_sec=(2 * RECONCILE_MINUTES + 1) * 60)
-		elif status != "Disconnected" and time.time() - first_seen >= RECONCILE_MINUTES * 60 - RECONCILE_SLACK_SECONDS:
+		elif (
+			status != "Disconnected"
+			and time.time() - first_seen >= RECONCILE_MINUTES * 60 - RECONCILE_SLACK_SECONDS
+		):
 			mark_disconnected(account)
 	# Anything else (connecting, qr_pending, paused, temp_banned...) is in flux
 	# or reported by its own callback: no change.

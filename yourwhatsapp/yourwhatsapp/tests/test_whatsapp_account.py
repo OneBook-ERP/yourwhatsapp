@@ -1,3 +1,4 @@
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import frappe
@@ -99,7 +100,9 @@ class TestWhatsAppAccount(LiveSafeTestCase):
 		with patch("requests.post", return_value=relay_response(body={"code": "ABCD-1234"})) as post:
 			result = self.account.pair_with_code()
 		self.assertEqual(result, {"code": "ABCD-1234"})
-		self.assertEqual(post.call_args.kwargs["json"], {"phone": "+1 555 000 1111", "proxy": "socks5://proxy.test:1080"})
+		self.assertEqual(
+			post.call_args.kwargs["json"], {"phone": "+1 555 000 1111", "proxy": "socks5://proxy.test:1080"}
+		)
 
 	def test_pair_with_code_surfaces_relay_error(self):
 		body = {"error": "invalid_number", "detail": "invalid phone number"}
@@ -108,7 +111,7 @@ class TestWhatsAppAccount(LiveSafeTestCase):
 				self.account.pair_with_code()
 		self.assertIn("invalid phone number", str(ctx.exception))
 
-	ALREADY_PAIRED = {"error": "conflict", "detail": "session is already paired"}
+	ALREADY_PAIRED: ClassVar[dict] = {"error": "conflict", "detail": "session is already paired"}
 
 	def _pair_already_paired(self, start_status):
 		responses = [relay_response(409, self.ALREADY_PAIRED), relay_response(body={"status": start_status})]
@@ -188,7 +191,12 @@ class TestWhatsAppAccount(LiveSafeTestCase):
 
 	def test_non_admin_forbidden(self):
 		with patch("frappe.get_roles", return_value=["Guest"]), patch("requests.post") as post:
-			for method in (self.account.connect, self.account.pair_with_code, self.account.pause,
-				self.account.resume, self.account.logout):
+			for method in (
+				self.account.connect,
+				self.account.pair_with_code,
+				self.account.pause,
+				self.account.resume,
+				self.account.logout,
+			):
 				self.assertRaises(frappe.PermissionError, method)
 		post.assert_not_called()

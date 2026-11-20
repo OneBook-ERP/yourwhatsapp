@@ -85,7 +85,11 @@ class TestRepliesReactions(LiveSafeTestCase):
 
 	def _reply(self, target_id, account=None, **fields):
 		return self._outgoing(
-			account=account or self.account_a, is_reply=1, reply_to_message_id=target_id, message="sure", **fields
+			account=account or self.account_a,
+			is_reply=1,
+			reply_to_message_id=target_id,
+			message="sure",
+			**fields,
 		)
 
 	def _reaction(self, target_id, emoji="👍", **fields):
@@ -145,7 +149,9 @@ class TestRepliesReactions(LiveSafeTestCase):
 	def test_reply_participant_reevaluated_on_failover(self):
 		self._sent_outgoing("OUT-FO", account=self.account_a, message="sent from A")
 		msg = self._reply("OUT-FO", account=self.account_a)
-		_, post = self._payload(msg, relay_response(409, {"error": "session_unavailable"}), relay_response(202))
+		_, post = self._payload(
+			msg, relay_response(409, {"error": "session_unavailable"}), relay_response(202)
+		)
 		first, second = (c.kwargs["json"] for c in post.call_args_list)
 		self.assertEqual(first["session_id"], self.account_a.session_id)
 		self.assertNotIn("reply_participant", first)
@@ -216,7 +222,9 @@ class TestRepliesReactions(LiveSafeTestCase):
 		target = self._incoming("IN-GONE", account=self.account_a)
 		reaction = self._reaction("IN-GONE")
 		frappe.delete_doc("WhatsApp Message", target.name, force=True, ignore_permissions=True)
-		bad = relay_response(400, {"error": "bad_request", "detail": "reply_to_message_id is required for a reaction"})
+		bad = relay_response(
+			400, {"error": "bad_request", "detail": "reply_to_message_id is required for a reaction"}
+		)
 		self._payload(reaction, bad)
 		row = self._row(reaction.name)
 		self.assertEqual((row.status, row.error_reason), ("Failed", "The original message no longer exists"))
@@ -238,7 +246,10 @@ class TestRepliesReactions(LiveSafeTestCase):
 
 	def _retry_state(self, name):
 		return frappe.db.get_value(
-			"WhatsApp Message", name, ["status", "whatsapp_account", "relay_retry_count", "next_retry_at"], as_dict=True
+			"WhatsApp Message",
+			name,
+			["status", "whatsapp_account", "relay_retry_count", "next_retry_at"],
+			as_dict=True,
 		)
 
 	def test_reaction_relay_unreachable_parks_on_same_account(self):
@@ -297,7 +308,9 @@ class TestRepliesReactions(LiveSafeTestCase):
 		late = self._reaction("IN-F")
 		self._payload(late)
 		frappe.enqueue.reset_mock()
-		api.message_status(status="Failed", local_message_id=late.name, error_code="send_failed", error_reason="boom")
+		api.message_status(
+			status="Failed", local_message_id=late.name, error_code="send_failed", error_reason="boom"
+		)
 		failovers = [c for c in frappe.enqueue.call_args_list if c.args and c.args[0] == api.FAILOVER_METHOD]
 		self.assertEqual(failovers, [])
 		row = self._row(late.name)
@@ -309,7 +322,9 @@ class TestRepliesReactions(LiveSafeTestCase):
 		api.message_status(status="Sent", local_message_id=reaction.name, message_id="WA-REACT")
 		row = self._row(reaction.name)
 		self.assertEqual((row.status, row.whatsapp_account), ("Sent", self.account_a.name))
-		self.assertEqual(frappe.db.get_value("WhatsApp Account", self.account_a.name, "daily_message_count"), 0)
+		self.assertEqual(
+			frappe.db.get_value("WhatsApp Account", self.account_a.name, "daily_message_count"), 0
+		)
 
 	# Inbound replies in CRM
 

@@ -101,7 +101,10 @@ class TestOutgoingMessage(LiveSafeTestCase):
 		outgoing = self._outgoing(to="+91 95663-72605", whatsapp_account=account_b.name)
 		for msg in (incoming, outgoing):
 			row = frappe.db.get_value(
-				"WhatsApp Message", msg.name, ["from", "to", "reference_doctype", "reference_name"], as_dict=True
+				"WhatsApp Message",
+				msg.name,
+				["from", "to", "reference_doctype", "reference_name"],
+				as_dict=True,
 			)
 			self.assertEqual(row.get("from") or row.to, "919566372605")
 			self.assertEqual((row.reference_doctype, row.reference_name), ("CRM Lead", lead.name))
@@ -141,9 +144,7 @@ class TestOutgoingMessage(LiveSafeTestCase):
 		other = frappe.get_doc({"doctype": "CRM Lead", "first_name": "Other Lead"}).insert(
 			ignore_permissions=True
 		)
-		msg = self._outgoing(
-			to="14155552671", reference_doctype="CRM Lead", reference_name=other.name
-		)
+		msg = self._outgoing(to="14155552671", reference_doctype="CRM Lead", reference_name=other.name)
 		self.assertEqual(self._reference(msg), ("CRM Lead", other.name))
 
 	def test_lid_sender_not_resolved_as_phone_number(self):

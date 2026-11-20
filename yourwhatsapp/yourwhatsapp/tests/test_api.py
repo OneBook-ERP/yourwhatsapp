@@ -48,7 +48,9 @@ class TestRelayCallbacks(LiveSafeTestCase):
 		return doc
 
 	def _status(self, name):
-		return frappe.db.get_value("WhatsApp Message", name, ["status", "message_id", "error_reason"], as_dict=True)
+		return frappe.db.get_value(
+			"WhatsApp Message", name, ["status", "message_id", "error_reason"], as_dict=True
+		)
 
 	def _failover_calls(self):
 		return [c for c in self.enqueue_mock.call_args_list if c.args and c.args[0] == FAILOVER_TARGET]
@@ -106,7 +108,9 @@ class TestRelayCallbacks(LiveSafeTestCase):
 	def test_unknown_id_noop(self):
 		result = api.message_status(status="Delivered", message_id="NOPE")
 		self.assertFalse(result["ok"])
-		result = api.message_status(status="Failed", local_message_id="does-not-exist", error_code="send_failed")
+		result = api.message_status(
+			status="Failed", local_message_id="does-not-exist", error_code="send_failed"
+		)
 		self.assertFalse(result["ok"])
 		self.assertEqual(self._failover_calls(), [])
 
@@ -143,7 +147,9 @@ class TestRelayCallbacks(LiveSafeTestCase):
 
 		def partial_write_then_fail(file_doc, **kwargs):
 			# Anything written before the error must be rolled back.
-			frappe.db.set_value("WhatsApp Message", file_doc.attached_to_name, "attach", "/private/files/partial")
+			frappe.db.set_value(
+				"WhatsApp Message", file_doc.attached_to_name, "attach", "/private/files/partial"
+			)
 			raise MaxFileSizeReachedError
 
 		with patch.object(File, "save", autospec=True, side_effect=partial_write_then_fail):

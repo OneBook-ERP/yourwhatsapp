@@ -30,8 +30,14 @@ class AlertsTestCase(LiveSafeTestCase):
 		if not frappe.db.exists("Role", role):
 			frappe.get_doc({"doctype": "Role", "role_name": role}).insert(ignore_permissions=True)
 		user = frappe.get_doc(
-			{"doctype": "User", "email": email, "first_name": email.split("@")[0], "enabled": enabled,
-			 "send_welcome_email": 0, "roles": [{"role": role}]}
+			{
+				"doctype": "User",
+				"email": email,
+				"first_name": email.split("@")[0],
+				"enabled": enabled,
+				"send_welcome_email": 0,
+				"roles": [{"role": role}],
+			}
 		).insert(ignore_permissions=True)
 		return user.name
 
@@ -88,8 +94,9 @@ class AlertsTestCase(LiveSafeTestCase):
 			with self.subTest(email=email):
 				self.sendmail.reset_mock()
 				addresses = {self.recipients: self.recipients, "Administrator": email}
-				with patch.object(alerts, "_administrator_enabled", return_value=True), patch.object(
-					alerts, "_stored_email", side_effect=lambda user: addresses.get(user)
+				with (
+					patch.object(alerts, "_administrator_enabled", return_value=True),
+					patch.object(alerts, "_stored_email", side_effect=lambda user: addresses.get(user)),
 				):
 					alerts._notify(self.account, "subject", "detail")
 				self.assertIn("Administrator", [b.for_user for b in self._bells()])
@@ -105,7 +112,9 @@ class AlertsTestCase(LiveSafeTestCase):
 		self.assertEqual(self._bells(), [])
 		self.sendmail.assert_not_called()
 		self.log_error_mock.assert_called_once()
-		self.assertIn("give a user System Manager or WhatsApp Admin", self.log_error_mock.call_args.kwargs["message"])
+		self.assertIn(
+			"give a user System Manager or WhatsApp Admin", self.log_error_mock.call_args.kwargs["message"]
+		)
 
 	def test_flap_throttled(self):
 		self._change("Active", "Disconnected")
@@ -182,7 +191,9 @@ class AlertsTestCase(LiveSafeTestCase):
 	def test_client_outdated_reason_in_alert(self):
 		self._change("Active", "Disconnected", reason="client outdated")
 		self.assertIn("client outdated", self.sendmail.call_args.kwargs["message"])
-		self.assertIn("client outdated", [b for b in self._bells() if b.for_user == self.recipients][0].subject)
+		self.assertIn(
+			"client outdated", next(b for b in self._bells() if b.for_user == self.recipients).subject
+		)
 
 	def test_no_email_account_bell_only(self):
 		self._patch("yourwhatsapp.yourwhatsapp.alerts.has_outgoing_email_account", return_value=False)
@@ -193,10 +204,11 @@ class AlertsTestCase(LiveSafeTestCase):
 		self.assertEqual(len([b for b in self._bells() if b.for_user == self.recipients]), 2)
 		log_error.assert_called_once()
 
-
 	def test_recipient_without_email_gets_bell_only(self):
 		no_email = self._make_user("alert-noemail@example.test", "WhatsApp Admin")
-		with patch.object(alerts, "_stored_email", side_effect=lambda user: None if user == no_email else user):
+		with patch.object(
+			alerts, "_stored_email", side_effect=lambda user: None if user == no_email else user
+		):
 			self._change("Active", "Disconnected")
 		self.assertIn(no_email, [b.for_user for b in self._bells()])
 		self.assertNotIn(no_email, self.sendmail.call_args.kwargs["recipients"])
@@ -213,15 +225,20 @@ class AlertsTestCase(LiveSafeTestCase):
 		self.assertEqual(ttls[alerts.alert_key(self.account, "down_sent")], alerts.DOWN_SENT_SECONDS)
 
 	def test_alert_failure_never_raises(self):
-		with patch.object(alerts, "_send_down", side_effect=RuntimeError), patch(
-			"frappe.log_error", side_effect=RuntimeError
+		with (
+			patch.object(alerts, "_send_down", side_effect=RuntimeError),
+			patch("frappe.log_error", side_effect=RuntimeError),
 		):
 			self._change("Active", "Disconnected")
 
 	def _relay_account(self, status="Active"):
 		account = frappe.get_doc(
-			{"doctype": "WhatsApp Account", "account_name": f"Alert Relay {uuid.uuid4().hex[:6]}",
-			 "phone_number": "15550009003", "status": status}
+			{
+				"doctype": "WhatsApp Account",
+				"account_name": f"Alert Relay {uuid.uuid4().hex[:6]}",
+				"phone_number": "15550009003",
+				"status": status,
+			}
 		).insert(ignore_permissions=True)
 		self._patch("yourwhatsapp.yourwhatsapp.api._verify_relay_key")
 		return account
@@ -266,8 +283,13 @@ class AlertsTestCase(LiveSafeTestCase):
 
 	def _reconcile(self, account):
 		# The relay is mocked as "connecting": reconcile leaves the status alone.
-		with patch("yourwhatsapp.yourwhatsapp.relay_client.relay_settings", return_value=("http://relay.test", "k")), \
-			patch("yourwhatsapp.yourwhatsapp.relay_client.session_status", return_value="connecting"):
+		with (
+			patch(
+				"yourwhatsapp.yourwhatsapp.relay_client.relay_settings",
+				return_value=("http://relay.test", "k"),
+			),
+			patch("yourwhatsapp.yourwhatsapp.relay_client.session_status", return_value="connecting"),
+		):
 			tasks.reconcile_account_status(names=[account])
 		self._commit()
 
@@ -310,8 +332,12 @@ class AlertsTestCase(LiveSafeTestCase):
 
 	def test_deleted_account_name_reuse_has_no_spurious_recovery(self):
 		account = frappe.get_doc(
-			{"doctype": "WhatsApp Account", "account_name": "Alert Reuse", "phone_number": "15550009002",
-			 "status": "Active"}
+			{
+				"doctype": "WhatsApp Account",
+				"account_name": "Alert Reuse",
+				"phone_number": "15550009002",
+				"status": "Active",
+			}
 		).insert(ignore_permissions=True)
 		self._change("Active", "Disconnected", account=account.name)
 		frappe.delete_doc("WhatsApp Account", account.name, force=True, ignore_permissions=True)
@@ -327,8 +353,12 @@ class AlertWiringTestCase(LiveSafeTestCase):
 		super().setUp()
 		self.changed = self.alerts_mock
 		self.account = frappe.get_doc(
-			{"doctype": "WhatsApp Account", "account_name": "Alert Wiring", "phone_number": "15550009001",
-			 "status": "Active"}
+			{
+				"doctype": "WhatsApp Account",
+				"account_name": "Alert Wiring",
+				"phone_number": "15550009001",
+				"status": "Active",
+			}
 		).insert(ignore_permissions=True)
 
 	def test_mark_disconnected_reports_old_status(self):
@@ -366,8 +396,10 @@ class AlertWiringTestCase(LiveSafeTestCase):
 		self.changed.assert_not_called()
 
 	def test_client_outdated_event_passes_reason(self):
-		with patch("frappe.log_error"), patch("frappe.get_request_header", return_value=RELAY_KEY), patch.object(
-			api, "_verify_relay_key"
+		with (
+			patch("frappe.log_error"),
+			patch("frappe.get_request_header", return_value=RELAY_KEY),
+			patch.object(api, "_verify_relay_key"),
 		):
 			api.account_event(self.account.session_id, "client_outdated")
 		self.changed.assert_called_once_with(self.account.name, "Active", "Disconnected", "client outdated")
