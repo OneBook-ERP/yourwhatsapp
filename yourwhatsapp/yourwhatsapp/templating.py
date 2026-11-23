@@ -78,7 +78,9 @@ def resolve(template_name, reference_doctype, reference_name) -> list[str]:
 		elif _has_value(row.default_value):
 			values[n - 1] = row.default_value
 		elif not reference:
-			problems.append(_("{0} ({1}) but the message has no reference document").format(_tags([n]), row.field))
+			problems.append(
+				_("{0} ({1}) but the message has no reference document").format(_tags([n]), row.field)
+			)
 		else:
 			problems.append(
 				_("{0} ({1}) but {2} {3} has no value").format(
@@ -129,7 +131,9 @@ def _check_read(doc):
 	if user == "Administrator" or frappe.has_permission(doc.doctype, "read", doc=doc, user=user):
 		return
 	frappe.throw(
-		_("You don't have permission to read {0} {1}, so a template can't use it.").format(doc.doctype, doc.name),
+		_("You don't have permission to read {0} {1}, so a template can't use it.").format(
+			doc.doctype, doc.name
+		),
 		frappe.PermissionError,
 	)
 

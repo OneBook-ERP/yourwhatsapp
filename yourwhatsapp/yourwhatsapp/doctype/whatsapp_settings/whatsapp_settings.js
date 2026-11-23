@@ -22,19 +22,25 @@ frappe.ui.form.on("WhatsApp Settings", {
 });
 
 function test_connection(frm, auto = false) {
-	frm.call({ method: "test_connection", doc: frm.doc, args: { auto: auto ? 1 : 0 } }).then((r) => {
-		const info = r.message || {};
-		frm.set_df_property("relay_api_key", "read_only", info.mode === "env" ? 0 : 1);
-		render_panel(frm, info);
-		add_relay_buttons(frm, info);
-	});
+	frm.call({ method: "test_connection", doc: frm.doc, args: { auto: auto ? 1 : 0 } }).then(
+		(r) => {
+			const info = r.message || {};
+			frm.set_df_property("relay_api_key", "read_only", info.mode === "env" ? 0 : 1);
+			render_panel(frm, info);
+			add_relay_buttons(frm, info);
+		}
+	);
 }
 
 function add_relay_buttons(frm, info) {
 	const group = __("Relay");
-	["Connect Relay", "Rotate Key", "Update Callback URL", "Retry Pending Key", "Replay Dead Callbacks"].forEach((label) =>
-		frm.remove_custom_button(__(label), group)
-	);
+	[
+		"Connect Relay",
+		"Rotate Key",
+		"Update Callback URL",
+		"Retry Pending Key",
+		"Replay Dead Callbacks",
+	].forEach((label) => frm.remove_custom_button(__(label), group));
 
 	if (info.pending) {
 		frm.add_custom_button(__("Retry Pending Key"), () => run(frm, "retry_pending"), group);
@@ -92,7 +98,11 @@ function run(frm, method) {
 function render_panel(frm, info) {
 	const wrapper = frm.get_field("relay_status_html").$wrapper;
 	if (!info) {
-		wrapper.html(`<p class="text-muted">${__("Set the Relay Base URL and save to see the relay status.")}</p>`);
+		wrapper.html(
+			`<p class="text-muted">${__(
+				"Set the Relay Base URL and save to see the relay status."
+			)}</p>`
+		);
 		return;
 	}
 	const state = STATE_LABELS[info.state] || { label: info.state, color: "gray" };
@@ -102,10 +112,16 @@ function render_panel(frm, info) {
 		[__("Version"), esc(info.version)],
 	];
 	if (info.sessions) {
-		rows.push([__("Numbers connected / linked"), `${esc(info.sessions.connected)} / ${esc(info.sessions.total)}`]);
+		rows.push([
+			__("Numbers connected / linked"),
+			`${esc(info.sessions.connected)} / ${esc(info.sessions.total)}`,
+		]);
 	}
 	if (info.outbox) {
-		rows.push([__("Callbacks pending / dead"), `${esc(info.outbox.pending)} / ${esc(info.outbox.dead)}`]);
+		rows.push([
+			__("Callbacks pending / dead"),
+			`${esc(info.outbox.pending)} / ${esc(info.outbox.dead)}`,
+		]);
 	}
 	if (info.callback_url) rows.push([__("Callback URL"), esc(info.callback_url)]);
 	if (info.site_name) rows.push([__("Site name"), esc(info.site_name)]);
@@ -114,16 +130,27 @@ function render_panel(frm, info) {
 	const notes = [];
 	if (info.pending) {
 		notes.push(
-			__("A key change was sent but not confirmed. Use Relay → Retry Pending Key before anything else.")
+			__(
+				"A key change was sent but not confirmed. Use Relay → Retry Pending Key before anything else."
+			)
 		);
 	}
 	if (info.mode === "env") {
-		notes.push(__("This relay takes its key from RELAY_API_KEY: type that value into Relay API Key and save."));
+		notes.push(
+			__(
+				"This relay takes its key from RELAY_API_KEY: type that value into Relay API Key and save."
+			)
+		);
 	}
 
 	wrapper.html(`
 		<table class="table table-bordered" style="max-width: 640px;">
-			${rows.map(([k, v]) => `<tr><th style="width: 40%;">${esc(k)}</th><td>${v || ""}</td></tr>`).join("")}
+			${rows
+				.map(
+					([k, v]) =>
+						`<tr><th style="width: 40%;">${esc(k)}</th><td>${v || ""}</td></tr>`
+				)
+				.join("")}
 		</table>
 		${notes.map((n) => `<p class="text-warning">${esc(n)}</p>`).join("")}
 	`);

@@ -519,7 +519,9 @@ class TestWhatsAppSettingsRelay(LiveSafeTestCase):
 
 	def test_connect_callback_unreachable_explains_and_clears_pending(self):
 		relay = FakeRelay()
-		relay.fail[("POST", "/claim")] = _response(400, {"error": "callback_unreachable", "detail": "http 404"})
+		relay.fail[("POST", "/claim")] = _response(
+			400, {"error": "callback_unreachable", "detail": "http 404"}
+		)
 		self._use(relay)
 
 		result = self._settings().connect_relay()
@@ -532,7 +534,9 @@ class TestWhatsAppSettingsRelay(LiveSafeTestCase):
 	def test_update_callback_unreachable_explains(self):
 		self._set_keys(current=OLD_KEY)
 		relay = FakeRelay(mode="claimed", current=OLD_KEY)
-		relay.fail[("PUT", "/claim/callback")] = _response(400, {"error": "callback_unreachable", "detail": "timeout"})
+		relay.fail[("PUT", "/claim/callback")] = _response(
+			400, {"error": "callback_unreachable", "detail": "timeout"}
+		)
 		self._use(relay)
 
 		result = self._settings().update_callback()
@@ -661,7 +665,10 @@ class TestWhatsAppSettingsRelay(LiveSafeTestCase):
 			"env": (FakeRelay(mode="env", current=typed), True),
 			"claimed": (FakeRelay(mode="claimed", current=OLD_KEY), False),
 			"unclaimed": (FakeRelay(), False),
-			"unreachable": (FakeRelay(fail={("GET", "/info"): requests.exceptions.ConnectionError("refused")}), False),
+			"unreachable": (
+				FakeRelay(fail={("GET", "/info"): requests.exceptions.ConnectionError("refused")}),
+				False,
+			),
 		}
 		for mode, (relay, allowed) in cases.items():
 			with self.subTest(mode=mode), patch.object(ws.requests, "request", side_effect=relay):
@@ -740,7 +747,9 @@ class TestWhatsAppSettingsRelay(LiveSafeTestCase):
 		settings.save()
 
 		# Read from __Auth: the saved doc object would answer with the typed value itself.
-		stored = get_decrypted_password("WhatsApp Settings", "WhatsApp Settings", "relay_api_key", raise_exception=False)
+		stored = get_decrypted_password(
+			"WhatsApp Settings", "WhatsApp Settings", "relay_api_key", raise_exception=False
+		)
 		self.assertEqual(stored, typed)
 
 	def test_form_save_with_empty_or_mask_never_deletes_current_key(self):

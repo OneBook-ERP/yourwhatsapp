@@ -75,7 +75,10 @@ class TestRelayClient(LiveSafeTestCase):
 
 	def _row(self, name):
 		return frappe.db.get_value(
-			"WhatsApp Message", name, ["status", "whatsapp_account", "error_reason", "attempted_accounts"], as_dict=True
+			"WhatsApp Message",
+			name,
+			["status", "whatsapp_account", "error_reason", "attempted_accounts"],
+			as_dict=True,
 		)
 
 	def _account_value(self, account, field):
@@ -99,7 +102,9 @@ class TestRelayClient(LiveSafeTestCase):
 
 	def test_duplicate_noop(self):
 		msg = self._make_message()
-		post = self._send(msg, relay_response(200, {"error": "duplicate", "state": "sent", "message_id": "X"}))
+		post = self._send(
+			msg, relay_response(200, {"error": "duplicate", "state": "sent", "message_id": "X"})
+		)
 		self.assertEqual(post.call_count, 1)
 		row = self._row(msg.name)
 		self.assertEqual((row.status, row.whatsapp_account), ("Queued", self.account_a.name))
@@ -131,7 +136,9 @@ class TestRelayClient(LiveSafeTestCase):
 
 	def test_timeout_retries_same_account_once(self):
 		msg = self._make_message()
-		post = self._send(msg, requests.exceptions.ConnectTimeout(), relay_response(200, {"error": "duplicate"}))
+		post = self._send(
+			msg, requests.exceptions.ConnectTimeout(), relay_response(200, {"error": "duplicate"})
+		)
 		self.assertEqual(post.call_count, 2)
 		self.assertEqual(self._row(msg.name).whatsapp_account, self.account_a.name)
 		self.assertEqual(
@@ -149,7 +156,10 @@ class TestRelayClient(LiveSafeTestCase):
 	def test_duplicate_during_failover_keeps_original_account(self):
 		msg = self._make_message()
 		self._send(
-			msg, requests.exceptions.ReadTimeout(), requests.exceptions.ReadTimeout(), relay_response(200, {"error": "duplicate"})
+			msg,
+			requests.exceptions.ReadTimeout(),
+			requests.exceptions.ReadTimeout(),
+			relay_response(200, {"error": "duplicate"}),
 		)
 		row = self._row(msg.name)
 		self.assertEqual((row.status, row.whatsapp_account), ("Queued", self.account_a.name))
@@ -219,7 +229,9 @@ class TestRelayClient(LiveSafeTestCase):
 		for case, (until, expected) in cases.items():
 			with self.subTest(case=case):
 				frappe.db.set_value(
-					"WhatsApp Account", self.account_a.name, {"status": "RateLimited", "rate_limited_until": until}
+					"WhatsApp Account",
+					self.account_a.name,
+					{"status": "RateLimited", "rate_limited_until": until},
 				)
 				routing.mark_disconnected(self.account_a.name)
 				self.assertEqual(self._account_value(self.account_a, "status"), expected)
@@ -236,12 +248,17 @@ class TestRelayClient(LiveSafeTestCase):
 
 	def _retry_row(self, name):
 		return frappe.db.get_value(
-			"WhatsApp Message", name, ["relay_retry_count", "next_retry_at", "attempted_accounts"], as_dict=True
+			"WhatsApp Message",
+			name,
+			["relay_retry_count", "next_retry_at", "attempted_accounts"],
+			as_dict=True,
 		)
 
 	def _relay_down(self, msg):
 		"""Every account fails as if the relay were down: connection refused, then restarting (409)."""
-		self._send(msg, requests.exceptions.ConnectionError(), relay_response(409, {"error": "session_unavailable"}))
+		self._send(
+			msg, requests.exceptions.ConnectionError(), relay_response(409, {"error": "session_unavailable"})
+		)
 
 	def test_relay_down_requeues_with_backoff(self):
 		msg = self._make_message()
@@ -261,7 +278,9 @@ class TestRelayClient(LiveSafeTestCase):
 			frappe.enqueue.assert_not_called()
 
 			# Once due, the job re-dispatches it exactly once.
-			frappe.db.set_value("WhatsApp Message", msg.name, "next_retry_at", add_to_date(now_datetime(), seconds=-1))
+			frappe.db.set_value(
+				"WhatsApp Message", msg.name, "next_retry_at", add_to_date(now_datetime(), seconds=-1)
+			)
 			tasks.retry_relay_unavailable_messages(names=[msg.name])
 			tasks.retry_relay_unavailable_messages(names=[msg.name])
 			sends = [c for c in frappe.enqueue.call_args_list if c.args[0] == relay_client.SEND_METHOD]
@@ -323,7 +342,9 @@ class TestRelayClient(LiveSafeTestCase):
 		msg = self._make_message()
 		self._send(msg, relay_response(202))
 		frappe.db.set_value("WhatsApp Account", self.account_b.name, "status", "Disconnected")
-		api.message_status(status="Failed", local_message_id=msg.name, error_code="send_failed", error_reason="boom")
+		api.message_status(
+			status="Failed", local_message_id=msg.name, error_code="send_failed", error_reason="boom"
+		)
 		relay_client.handle_async_failure(msg.name, "send_failed")
 		row = self._row(msg.name)
 		self.assertEqual(row.status, "Failed")
@@ -334,7 +355,9 @@ class TestRelayClient(LiveSafeTestCase):
 	def test_async_failure_fails_over_excluding_attempted(self):
 		msg = self._make_message()
 		self._send(msg, relay_response(202))
-		api.message_status(status="Failed", local_message_id=msg.name, error_code="send_failed", error_reason="boom")
+		api.message_status(
+			status="Failed", local_message_id=msg.name, error_code="send_failed", error_reason="boom"
+		)
 		self.assertEqual(self._row(msg.name).status, "Failed")
 
 		with patch("requests.post", return_value=relay_response(202)) as post:
@@ -390,7 +413,6 @@ class TestRelayClient(LiveSafeTestCase):
 		manual = self._make_account("Client Manual", status="RateLimited")
 		tasks.recover_rate_limited_accounts(names=[manual.name])
 		self.assertEqual(self._account_value(manual, "status"), "RateLimited")
-
 
 	# A 401 means this site's key is out of step with the relay, never that the message is bad.
 	def _info(self, status_code, body):

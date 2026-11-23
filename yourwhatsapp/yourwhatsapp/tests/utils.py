@@ -51,7 +51,9 @@ class LiveSafeTestCase(IntegrationTestCase):
 			self.alerts_mock = self._start_patch(
 				patch.object(alerts, "account_status_changed", MagicMock(name="account_status_changed"))
 			)
-			self.report_down_mock = self._start_patch(patch.object(alerts, "report_down", MagicMock(name="report_down")))
+			self.report_down_mock = self._start_patch(
+				patch.object(alerts, "report_down", MagicMock(name="report_down"))
+			)
 
 	def _start_patch(self, started):
 		mock = started.start()

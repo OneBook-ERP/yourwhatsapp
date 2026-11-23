@@ -8,7 +8,7 @@ app_license = "mit"
 # Apps
 # ------------------
 
-# required_apps = []
+required_apps = ["crm"]
 
 # Each item in the list will be shown as an app in the apps page
 # add_to_apps_screen = [
@@ -159,9 +159,7 @@ scheduler_events = {
 		# Every minute: relay-unavailable retries back off 1, 2, 5, 10, 20 min.
 		"* * * * *": ["yourwhatsapp.yourwhatsapp.tasks.retry_relay_unavailable_messages"],
 	},
-	"daily": [
-		"yourwhatsapp.yourwhatsapp.tasks.reset_daily_message_counts"
-	],
+	"daily": ["yourwhatsapp.yourwhatsapp.tasks.reset_daily_message_counts"],
 }
 
 # Testing
@@ -252,4 +250,3 @@ scheduler_events = {
 # ------------
 # List of apps whose translatable strings should be excluded from this app's translations.
 # ignore_translatable_strings_from = []
-

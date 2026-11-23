@@ -40,7 +40,9 @@ def pick_account(exclude=None, recipient=None):
 	if not eligible:
 		return None
 
-	strategy = frappe.get_cached_value("WhatsApp Settings", "WhatsApp Settings", "routing_strategy") or "Round Robin"
+	strategy = (
+		frappe.get_cached_value("WhatsApp Settings", "WhatsApp Settings", "routing_strategy") or "Round Robin"
+	)
 
 	if strategy == "Priority":
 		eligible.sort(key=lambda a: a.priority or 0)
@@ -129,7 +131,9 @@ def _is_active(account):
 
 def _first_active_account(exclude=None):
 	# Sorted here: frappe.get_all refuses ifnull() in order_by, and NULL priority means 0.
-	accounts = frappe.get_all("WhatsApp Account", filters={"status": "Active"}, fields=["name", "priority", "creation"])
+	accounts = frappe.get_all(
+		"WhatsApp Account", filters={"status": "Active"}, fields=["name", "priority", "creation"]
+	)
 	accounts = sorted((a for a in accounts if a.name != exclude), key=lambda a: (a.priority or 0, a.creation))
 	return accounts[0].name if accounts else None
 

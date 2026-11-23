@@ -3,9 +3,11 @@
 # See DEPLOYMENT.md. Never publish the relay port: only Frappe containers may reach it.
 services:
   whatsapp-relay:
-    image: ghcr.io/<org>/yourwhatsapp-relay:<version>
-    # build:
-    #   context: ./apps/yourwhatsapp/yourwhatsapp/yourwhatsapp/relay
+    # Pre-built public image (GitHub Actions, .github/workflows/relay-image.yml), pulled like
+    # redis/mariadb. Set RELAY_VERSION to the same release tag you use for yourwhatsapp in
+    # apps.json (e.g. v1.2.0). Never "latest". RELAY_IMAGE overrides the repository (forks,
+    # mirrors, local test builds such as yourwhatsapp-relay).
+    image: ${RELAY_IMAGE:-ghcr.io/onebook-erp/yourwhatsapp-relay}:${RELAY_VERSION:?set RELAY_VERSION to a yourwhatsapp release tag, e.g. v1.2.0}
     restart: unless-stopped
     stop_grace_period: 30s
     environment:

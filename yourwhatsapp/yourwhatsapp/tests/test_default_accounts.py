@@ -145,11 +145,11 @@ class TestDefaultAccounts(DefaultsTestCase):
 
 	def test_routing_still_rotates_ignoring_default(self):
 		first = self._make_account("Default Test B", "15550001002", last_used=now_datetime())
-		second = self._make_account("Default Test C", "15550001003", last_used=now_datetime() - timedelta(hours=1))
+		second = self._make_account(
+			"Default Test C", "15550001003", last_used=now_datetime() - timedelta(hours=1)
+		)
 		self._set_defaults(first.name, first.name)
-		scoped = [
-			a for a in routing.get_eligible_accounts() if a.name in (first.name, second.name)
-		]
+		scoped = [a for a in routing.get_eligible_accounts() if a.name in (first.name, second.name)]
 		with (
 			patch.object(routing, "get_eligible_accounts", return_value=scoped),
 			patch.object(frappe, "get_cached_value", return_value="Round Robin"),

@@ -23,7 +23,10 @@ function add_connect_button(frm) {
 	}
 	frm.add_custom_button(__("Connect / Generate QR"), () => {
 		frm.call("connect").then(() => {
-			frappe.show_alert({ message: __("Starting session — waiting for QR..."), indicator: "blue" });
+			frappe.show_alert({
+				message: __("Starting session — waiting for QR..."),
+				indicator: "blue",
+			});
 			poll_until_connected(frm);
 		});
 	});
@@ -36,8 +39,9 @@ function add_session_buttons(frm) {
 		frm.add_custom_button(__("Pause"), () => frm.call("pause").then(() => frm.reload_doc()));
 	}
 	frm.add_custom_button(__("Logout"), () => {
-		frappe.confirm(__("Log this account out of WhatsApp? It will have to be paired again."), () =>
-			frm.call("logout").then(() => frm.reload_doc())
+		frappe.confirm(
+			__("Log this account out of WhatsApp? It will have to be paired again."),
+			() => frm.call("logout").then(() => frm.reload_doc())
 		);
 	});
 }
@@ -62,7 +66,9 @@ function show_pairing_dialog(frm, code) {
 		fields: [{ fieldtype: "HTML", fieldname: "code_html" }],
 	});
 	dialog.get_field("code_html").$wrapper.html(
-		`<div style="font-family: monospace; font-size: 2rem; letter-spacing: 0.15em; text-align: center; margin: 1rem 0;">${frappe.utils.escape_html(code)}</div>
+		`<div style="font-family: monospace; font-size: 2rem; letter-spacing: 0.15em; text-align: center; margin: 1rem 0;">${frappe.utils.escape_html(
+			code
+		)}</div>
 		<p class="text-muted">${frappe.utils.escape_html(PAIRING_INSTRUCTIONS)}</p>`
 	);
 	dialog.show();

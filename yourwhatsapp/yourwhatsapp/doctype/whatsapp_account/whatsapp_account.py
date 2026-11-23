@@ -1,5 +1,5 @@
-import requests
 import frappe
+import requests
 from frappe import _
 from frappe.model.document import Document
 from frappe.utils import random_string
@@ -138,4 +138,8 @@ def _relay_error_message(response):
 	except ValueError:
 		body = {}
 	detail = body.get("detail") or body.get("error")
-	return f"Relay error ({response.status_code}): {detail}" if detail else f"Relay error ({response.status_code})"
+	return (
+		f"Relay error ({response.status_code}): {detail}"
+		if detail
+		else f"Relay error ({response.status_code})"
+	)

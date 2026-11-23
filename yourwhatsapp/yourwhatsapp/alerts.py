@@ -65,7 +65,9 @@ def send_pending_down_alerts(names=None) -> None:
 	accounts still down (reconcile_account_status runs this every 5 minutes).
 	An account that recovered, or that an admin Paused, drops its pending alert."""
 	filters = {"name": ["in", names]} if names is not None else {}
-	for account, status in frappe.get_all("WhatsApp Account", filters=filters, fields=["name", "status"], as_list=True):
+	for account, status in frappe.get_all(
+		"WhatsApp Account", filters=filters, fields=["name", "status"], as_list=True
+	):
 		pending = frappe.cache.get_value(alert_key(account, "pending_down"))
 		if not pending or frappe.cache.get_value(alert_key(account, "down")):
 			continue
@@ -84,7 +86,9 @@ def alert_recipients() -> list[str]:
 		pluck="parent",
 		distinct=True,
 	)
-	enabled = frappe.get_all("User", filters={"name": ("in", users), "enabled": 1}, pluck="name") if users else []
+	enabled = (
+		frappe.get_all("User", filters={"name": ("in", users), "enabled": 1}, pluck="name") if users else []
+	)
 	recipients = {user for user in enabled if user not in ("Guest", "Administrator")}
 	if _administrator_enabled():
 		recipients.add("Administrator")
@@ -195,7 +199,9 @@ def _safely(account: str, send, *args):
 		# not even when the transaction is too broken to write the Error Log.
 		try:
 			frappe.log_error(
-				title="WhatsApp health alert failed", reference_doctype="WhatsApp Account", reference_name=account
+				title="WhatsApp health alert failed",
+				reference_doctype="WhatsApp Account",
+				reference_name=account,
 			)
 		except Exception:
 			pass

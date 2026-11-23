@@ -24,7 +24,7 @@ def _frappe_case_classes(path):
 		if names & {"IntegrationTestCase", "FrappeTestCase", BASE}:
 			return True
 		return any(
-			is_frappe_case(classes[n], seen + (node.name,)) for n in names if n in classes and n not in seen
+			is_frappe_case(classes[n], (*seen, node.name)) for n in names if n in classes and n not in seen
 		)
 
 	def is_live_safe(node, seen=()):
@@ -32,7 +32,7 @@ def _frappe_case_classes(path):
 		if BASE in names:
 			return True
 		return any(
-			is_live_safe(classes[n], seen + (node.name,)) for n in names if n in classes and n not in seen
+			is_live_safe(classes[n], (*seen, node.name)) for n in names if n in classes and n not in seen
 		)
 
 	return [(name, is_live_safe(node)) for name, node in classes.items() if is_frappe_case(node)]
