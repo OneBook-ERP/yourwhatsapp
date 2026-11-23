@@ -88,10 +88,11 @@ jobs:
       - name: Install
         working-directory: /home/runner/frappe-bench
         run: |
-          # yourwhatsapp needs CRM (its doctypes and crm.api.whatsapp); the tests also
+          # yourwhatsapp needs CRM's WhatsApp seam (WhatsApp * doctypes, crm.api.whatsapp), which
+          # CRM's develop branch replaced with its own WA * doctypes; the tests also
           # resolve template fields on ERPNext doctypes (Customer, Sales Order).
           bench get-app --skip-assets erpnext --branch version-16
-          bench get-app --skip-assets crm --branch develop
+          bench get-app --skip-assets crm --branch main
           bench get-app yourwhatsapp $GITHUB_WORKSPACE
           bench setup requirements --dev
           bench new-site --db-root-password root --admin-password admin test_site
