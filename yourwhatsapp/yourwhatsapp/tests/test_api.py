@@ -187,10 +187,15 @@ class TestRelayCallbacks(LiveSafeTestCase):
 		frappe.set_user("Guest")
 
 		name = api.inbound_message(
-			session_id=self.account.session_id, from_number="919999900001", message="hello", message_id="IN-LEAD"
+			session_id=self.account.session_id,
+			from_number="919999900001",
+			message="hello",
+			message_id="IN-LEAD",
 		)["name"]
 
-		row = frappe.db.get_value("WhatsApp Message", name, ["reference_doctype", "reference_name"], as_dict=True)
+		row = frappe.db.get_value(
+			"WhatsApp Message", name, ["reference_doctype", "reference_name"], as_dict=True
+		)
 		self.assertEqual((row.reference_doctype, row.reference_name), ("CRM Lead", lead.name))
 
 	def test_account_event_temp_banned(self):
