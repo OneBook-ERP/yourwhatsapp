@@ -131,6 +131,7 @@ class TestDefaultAccounts(DefaultsTestCase):
 		tasks.recover_rate_limited_accounts(names=[self.account.name])
 
 	def test_patch_fills_when_empty(self):
+		frappe.db.set_value("WhatsApp Account", self.account.name, "status", "Active")
 		fill_default_whatsapp_accounts.execute()
 		for default in self._defaults():
 			self.assertEqual(frappe.db.get_value("WhatsApp Account", default, "status"), "Active")
