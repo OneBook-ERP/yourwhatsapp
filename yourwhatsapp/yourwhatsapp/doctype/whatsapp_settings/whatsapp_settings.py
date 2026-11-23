@@ -196,7 +196,7 @@ class WhatsAppSettings(Document):
 		return _failed(_relay_error(response), self._known_keys())
 
 	@frappe.whitelist()
-	def test_connection(self, auto=False):
+	def test_connection(self, auto: bool = False):
 		"""The relay's /info plus a state: ok, unreachable, key_rejected or unclaimed.
 
 		`auto`: the form's own check on load, which gives up sooner."""
@@ -227,7 +227,8 @@ class WhatsAppSettings(Document):
 				frappe.throw(_(KEY_PENDING))
 			key = secrets.token_urlsafe(32)
 			write_password("relay_pending_key", key)
-			frappe.db.commit()
+			# The pending key must survive a rollback if the relay call that follows fails.
+			frappe.db.commit()  # nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit
 		return key
 
 	def _claim(self, key):
@@ -332,7 +333,8 @@ def adopt_pending_key():
 		if not acquired or _locked_pending_key() != pending:
 			return None
 		settings._promote_pending(pending)
-		frappe.db.commit()
+		# Committed at once so the send's HTTP calls hold no row lock (see the docstring).
+		frappe.db.commit()  # nosemgrep: frappe-semgrep-rules.rules.frappe-manual-commit
 	return pending
 
 

@@ -43,7 +43,7 @@ class WhatsAppAccount(Document):
 		alerts.clear_manual(self.name)
 		status = result.get("status")
 		if status == "paused":
-			frappe.throw("Account is paused on the relay; use Resume")
+			frappe.throw(_("Account is paused on the relay; use Resume"))
 		if status == "connected":
 			set_account_active(self.name)
 		return result

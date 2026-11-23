@@ -165,7 +165,7 @@ def _notify(account: str, subject: str, detail: str):
 
 
 def _email(recipients: list[str], subject: str, detail: str, link: str):
-	addresses = [email for email in map(_user_email, recipients) if email]
+	addresses = [email for recipient in recipients if (email := _user_email(recipient))]
 	if not addresses:
 		return
 	if not has_outgoing_email_account():

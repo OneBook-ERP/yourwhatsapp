@@ -37,7 +37,9 @@ def _verify_relay_key():
 		frappe.throw("Invalid relay API key", frappe.PermissionError)
 
 
-@frappe.whitelist(allow_guest=True, methods=["POST"])
+# The relay is a service, not a Desk user: every endpoint below is guest-callable and starts
+# with _verify_relay_key() (constant-time compare, fails closed when no key is stored).
+@frappe.whitelist(allow_guest=True, methods=["POST"])  # nosemgrep: guest-whitelisted-method
 def ping():
 	"""The relay calls this before it accepts a callback URL: an answer proves
 	the URL reaches this site and that the site knows the key it will sign with."""
@@ -45,7 +47,7 @@ def ping():
 	return {"ok": True}
 
 
-@frappe.whitelist(allow_guest=True, methods=["POST"])
+@frappe.whitelist(allow_guest=True, methods=["POST"])  # nosemgrep: guest-whitelisted-method
 def inbound_message(
 	session_id: str,
 	from_number: str,
@@ -61,8 +63,8 @@ def inbound_message(
 	from_lid: bool = False,
 ):
 	_verify_relay_key()
-	# CRM's save hooks permission-check the linked Lead, which a Guest cannot read.
-	frappe.set_user("Administrator")
+	# The relay key is verified above. CRM's save hooks permission-check the linked Lead, which a Guest cannot read.
+	frappe.set_user("Administrator")  # nosemgrep: frappe-semgrep-rules.rules.security.frappe-setuser
 
 	account = frappe.db.get_value("WhatsApp Account", {"session_id": session_id}, "name")
 	if not account:
@@ -141,7 +143,7 @@ def _save_inbound_media(message_name: str, media_base64: str, mimetype: str | No
 	frappe.db.set_value("WhatsApp Message", message_name, "attach", file_doc.file_url)
 
 
-@frappe.whitelist(allow_guest=True, methods=["POST"])
+@frappe.whitelist(allow_guest=True, methods=["POST"])  # nosemgrep: guest-whitelisted-method
 def message_status(
 	status: str,
 	message_id: str | None = None,
@@ -221,7 +223,7 @@ def _apply_failure(name: str, error_reason: str | None, error_code: str | None, 
 	return {"ok": True}
 
 
-@frappe.whitelist(allow_guest=True, methods=["POST"])
+@frappe.whitelist(allow_guest=True, methods=["POST"])  # nosemgrep: guest-whitelisted-method
 def account_event(session_id: str, event: str, until: str | None = None):
 	_verify_relay_key()
 
@@ -249,7 +251,7 @@ def account_event(session_id: str, event: str, until: str | None = None):
 	return {"ok": True}
 
 
-@frappe.whitelist(allow_guest=True, methods=["POST"])
+@frappe.whitelist(allow_guest=True, methods=["POST"])  # nosemgrep: guest-whitelisted-method
 def update_qr(
 	session_id: str, qr_base64: str | None = None, status: str | None = None, reason: str | None = None
 ):

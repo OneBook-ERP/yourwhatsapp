@@ -24,6 +24,8 @@ class WhatsAppTemplates(Document):
 		missing = [n for n in numbers if n not in seen]
 		if missing:
 			frappe.throw(
-				_("Add a parameter row for placeholder(s) {0}.").format(", ".join(map(str, missing))),
+				_("Add a parameter row for placeholder(s) {0}.").format(
+					", ".join(str(number) for number in missing)
+				),
 				frappe.ValidationError,
 			)
