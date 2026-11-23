@@ -118,7 +118,7 @@ class TestRelayCallbacks(LiveSafeTestCase):
 
 	def test_message_id_is_indexed(self):
 		self.assertTrue(frappe.get_meta("WhatsApp Message").get_field("message_id").search_index)
-		self.assertTrue(frappe.db.has_index("tabWhatsApp Message", "message_id_index"))
+		self.assertTrue(frappe.db.get_column_index("tabWhatsApp Message", "message_id"))
 
 	def test_send_unconfirmed_keeps_message_id_without_failover(self):
 		msg = self._make_outgoing()
