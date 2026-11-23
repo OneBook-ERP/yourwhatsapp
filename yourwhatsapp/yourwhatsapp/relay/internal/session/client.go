@@ -22,12 +22,16 @@ type WAClient interface {
 	PairPhone(ctx context.Context, phone string, showPushNotification bool, clientType whatsmeow.PairClientType, clientDisplayName string) (string, error)
 	IsOnWhatsApp(ctx context.Context, phones []string) ([]types.IsOnWhatsAppResponse, error)
 	Upload(ctx context.Context, plaintext []byte, mediaType whatsmeow.MediaType) (whatsmeow.UploadResponse, error)
+	GenerateMessageID() types.MessageID
 	SendMessage(ctx context.Context, to types.JID, message *waE2E.Message, extra ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error)
+	BuildReaction(chat, sender types.JID, id types.MessageID, reaction string) *waE2E.Message
 	SendChatPresence(ctx context.Context, jid types.JID, state types.ChatPresence, media types.ChatPresenceMedia) error
 	Download(ctx context.Context, msg whatsmeow.DownloadableMessage) ([]byte, error)
 	SetProxyAddress(addr string, opts ...whatsmeow.SetProxyOptions) error
 	AddEventHandler(handler whatsmeow.EventHandler) uint32
 	OwnJID() types.JID
+	// OwnLID is the account's own LID, or EmptyJID when not yet known.
+	OwnLID() types.JID
 }
 
 // ClientFactory builds a client for a device loaded from (or new to) the store.
@@ -51,3 +55,5 @@ func (c *whatsmeowClient) OwnJID() types.JID {
 	}
 	return types.EmptyJID
 }
+
+func (c *whatsmeowClient) OwnLID() types.JID { return c.Store.GetLID() }

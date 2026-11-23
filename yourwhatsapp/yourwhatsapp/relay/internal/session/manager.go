@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"go.mau.fi/whatsmeow/proto/waCompanionReg"
 	wastore "go.mau.fi/whatsmeow/store"
@@ -31,6 +32,11 @@ const (
 )
 
 const (
+	// maxReactionRunes bounds a reaction's emoji; ZWJ sequences and skin
+	// tones make one emoji several runes.
+	maxReactionRunes = 16
+	// maxParticipantDigits: E.164 allows 15; a little slack, no unbounded JIDs.
+	maxParticipantDigits = 20
 	defaultQueueCapacity = 50
 	inFlightWait         = 10 * time.Second
 )
@@ -42,10 +48,21 @@ var (
 	ErrShuttingDown   = errors.New("relay is shutting down")
 )
 
-// SendRequest is the body of POST /message/send.
+// ContentReaction is the content_type of a reaction: Message is the emoji
+// (empty removes the reaction) and ReplyToID is the message reacted to.
+const ContentReaction = "reaction"
+
+// SendRequest is the body of POST /message/send. ReplyToID, when set, makes
+// the message a quoted reply (or names a reaction's target); ReplyFromMe says
+// the quoted message was ours and ReplyText is the quote's text.
 type SendRequest struct {
 	SessionID, To, ContentType, Message, LocalID, AttachBase64, AttachMimetype, AttachFilename string
 	ToIsLID                                                                                    bool
+	ReplyToID, ReplyText                                                                       string
+	ReplyFromMe                                                                                bool
+	// ReplyParticipant is the number (digits) that sent a from-me quoted
+	// message, which may be another of our numbers; empty means this session.
+	ReplyParticipant string
 }
 
 // SendError is a synchronous /message/send outcome other than 202. Code
@@ -83,6 +100,10 @@ type Manager struct {
 	sessions map[string]*Session
 	idLocks  map[string]*sync.Mutex
 	closed   bool
+	// lostSends are the sends still queued from the previous process,
+	// found by RestoreAll and reported Failed by FailLostSendsAfter.
+	lostSends     []store.SendRecord
+	stopLostSends func() bool
 }
 
 var deviceIdentityOnce sync.Once
@@ -130,12 +151,16 @@ func (m *Manager) session(id string) *Session {
 	return m.sessions[id]
 }
 
-// RestoreAll fails sends lost with the previous process, then connects every
-// paired, unpaused account.
+// RestoreAll records the sends lost with the previous process (see
+// FailLostSendsAfter), then connects every paired, unpaused account.
 func (m *Manager) RestoreAll(ctx context.Context) error {
-	if err := m.failLostSends(ctx); err != nil {
-		return err
+	lost, err := m.st.ListQueued(ctx)
+	if err != nil {
+		return fmt.Errorf("list queued sends: %w", err)
 	}
+	m.mu.Lock()
+	m.lostSends = lost
+	m.mu.Unlock()
 	accounts, err := m.st.ListRestorable(ctx)
 	if err != nil {
 		return fmt.Errorf("list restorable accounts: %w", err)
@@ -151,22 +176,39 @@ func (m *Manager) RestoreAll(ctx context.Context) error {
 	return nil
 }
 
-// failLostSends reports every send still queued from the previous process as
-// Failed. Each row is marked failed only after its callback is in the outbox,
-// so an error leaves the remaining rows queued for the next boot.
+// FailLostSendsAfter reports the sends RestoreAll found as Failed once grace
+// has passed. Call it once the HTTP server is listening: Frappe fails each
+// one over at once, so the restored sessions need time to reconnect first.
+func (m *Manager) FailLostSendsAfter(grace time.Duration) {
+	stop := m.afterFunc(grace, func() {
+		ctx, cancel := context.WithTimeout(context.Background(), time.Minute)
+		defer cancel()
+		if err := m.failLostSends(ctx); err != nil {
+			m.log.Error("report lost sends; the rest stay queued for the next boot", "error", err)
+		}
+	})
+	m.mu.Lock()
+	m.stopLostSends = stop
+	m.mu.Unlock()
+}
+
+// failLostSends reports every lost send as Failed with relay_restarted, which
+// Frappe retries on the same account. Each row is marked failed only after
+// its callback is in the outbox, so an error leaves the remaining rows queued
+// for the next boot.
 func (m *Manager) failLostSends(ctx context.Context) error {
-	queued, err := m.st.ListQueued(ctx)
-	if err != nil {
-		return fmt.Errorf("list queued sends: %w", err)
-	}
-	for _, r := range queued {
+	m.mu.Lock()
+	lost := m.lostSends
+	m.lostSends = nil
+	m.mu.Unlock()
+	for _, r := range lost {
 		if err := m.enqueue(ctx, outbox.MethodStatus, statusPayload{
-			LocalMessageID: r.LocalID, Status: "Failed", ErrorCode: store.ErrCodeSendFailed,
+			LocalMessageID: r.LocalID, Status: "Failed", ErrorCode: store.ErrCodeRelayRestarted,
 			ErrorReason: "relay restarted before the message was sent",
 		}); err != nil {
 			return fmt.Errorf("enqueue failed send %s: %w", r.LocalID, err)
 		}
-		if _, err := m.st.MarkFailed(ctx, r.LocalID, r.SessionID, store.ErrCodeSendFailed); err != nil {
+		if _, err := m.st.MarkFailed(ctx, r.LocalID, r.SessionID, store.ErrCodeRelayRestarted); err != nil {
 			return fmt.Errorf("mark send %s failed: %w", r.LocalID, err)
 		}
 	}
@@ -186,7 +228,18 @@ func (m *Manager) Start(ctx context.Context, sessionID string, proxy *string) (s
 func (m *Manager) start(ctx context.Context, id string, proxy *string, interactive bool) (string, error) {
 	if s := m.session(id); s != nil {
 		if s.live() {
-			return s.Status(), nil
+			status := s.Status()
+			if status == StatusConnected {
+				// Frappe may have missed or overridden the Active push
+				// (e.g. a resume racing it); repeat it.
+				if err := m.enqueue(ctx, outbox.MethodQR, qrPayload{SessionID: id, Status: frappeActive}); err != nil {
+					m.log.Error("enqueue callback", "session_id", id, "method", outbox.MethodQR, "error", err)
+				}
+			}
+			return status, nil
+		}
+		if m.redialable(ctx, s, proxy) {
+			return s.connect()
 		}
 		m.retire(s)
 	}
@@ -214,6 +267,20 @@ func (m *Manager) start(ctx context.Context, id string, proxy *string, interacti
 		return s.startQR()
 	}
 	return s.connect()
+}
+
+// redialable reports whether start can dial a disconnected paired session's
+// existing client instead of rebuilding it: a rebuild could leave two sockets
+// while whatsmeow's own auto-reconnect is live. A proxy change needs a new client.
+func (m *Manager) redialable(ctx context.Context, s *Session, proxy *string) bool {
+	if s.retired() || s.client == nil || s.dev == nil || s.dev.ID == nil || s.Status() != StatusDisconnected {
+		return false
+	}
+	acct, found, err := m.st.GetAccount(ctx, s.id)
+	if err != nil || !found || acct.Paused {
+		return false
+	}
+	return proxy == nil || *proxy == acct.Proxy
 }
 
 // PairCode begins phone-number pairing for an unpaired account and returns
@@ -280,6 +347,22 @@ func (m *Manager) Status(sessionID string) (status, jid, phoneNumber string) {
 	return status, "", ""
 }
 
+// Connected returns how many live sessions are connected right now.
+func (m *Manager) Connected() (connected int) {
+	m.mu.Lock()
+	sessions := make([]*Session, 0, len(m.sessions))
+	for _, s := range m.sessions {
+		sessions = append(sessions, s)
+	}
+	m.mu.Unlock()
+	for _, s := range sessions {
+		if s.Status() == StatusConnected {
+			connected++
+		}
+	}
+	return connected
+}
+
 // Pause disconnects the account and keeps it down across restarts.
 func (m *Manager) Pause(ctx context.Context, sessionID string) error {
 	unlock := m.lockID(sessionID)
@@ -302,21 +385,21 @@ func (m *Manager) Pause(ctx context.Context, sessionID string) error {
 	return nil
 }
 
-// Resume clears the pause and connects.
-func (m *Manager) Resume(ctx context.Context, sessionID string, proxy *string) error {
+// Resume clears the pause and connects, returning the session status.
+func (m *Manager) Resume(ctx context.Context, sessionID string, proxy *string) (string, error) {
 	unlock := m.lockID(sessionID)
 	defer unlock()
 	if err := m.requireAccount(ctx, sessionID); err != nil {
-		return err
+		return "", err
 	}
 	if err := m.st.SetAccountPaused(ctx, sessionID, false); err != nil {
-		return err
+		return "", err
 	}
-	_, err := m.start(ctx, sessionID, proxy, true)
-	return err
+	return m.start(ctx, sessionID, proxy, true)
 }
 
-// Logout unlinks the device, deletes its store and clears the account's JID.
+// Logout unlinks the device, deletes its store and clears the account's JID
+// and pause.
 // If WhatsApp can't be reached the local device data is still removed.
 func (m *Manager) Logout(ctx context.Context, sessionID string) error {
 	unlock := m.lockID(sessionID)
@@ -342,6 +425,10 @@ func (m *Manager) Logout(ctx context.Context, sessionID string) error {
 	if err := m.st.SetAccountJID(ctx, sessionID, ""); err != nil {
 		return err
 	}
+	// A logged-out account starts over: a pause from before must not block re-pairing.
+	if err := m.st.SetAccountPaused(ctx, sessionID, false); err != nil {
+		return err
+	}
 	m.setInactive(sessionID, StatusLoggedOut, types.EmptyJID)
 	return m.enqueue(ctx, outbox.MethodQR, qrPayload{SessionID: sessionID, Status: frappeDisconnected})
 }
@@ -358,6 +445,9 @@ func (m *Manager) Send(ctx context.Context, req SendRequest) *SendError {
 	}
 	s := m.session(req.SessionID)
 	if s == nil {
+		// Frappe (relay_client.SESSION_DOWN) marks the account Disconnected on
+		// this detail and on sendBlocker's not_started / logged_out; pinned by
+		// TestSessionDownDetails.
 		return &SendError{Code: CodeSessionUnavailable, HTTP: http.StatusConflict, Detail: "session is not running"}
 	}
 	if code, detail := s.sendBlocker(); code != "" {
@@ -376,6 +466,8 @@ func (m *Manager) Send(ctx context.Context, req SendRequest) *SendError {
 	job := &sendJob{
 		localID: req.LocalID, to: to, contentType: req.ContentType, text: req.Message,
 		media: media, mimetype: req.AttachMimetype, filename: req.AttachFilename,
+		replyToID: req.ReplyToID, replyFromMe: req.ReplyFromMe, replyText: req.ReplyText,
+		replyParticipant: onlyDigits(req.ReplyParticipant),
 	}
 	if media != nil {
 		if job.mimetype == "" {
@@ -405,6 +497,18 @@ func validateSend(req SendRequest) (media []byte, serr *SendError) {
 		return nil, bad("to is required")
 	case req.LocalID == "":
 		return nil, bad("local_message_id is required")
+	case len(onlyDigits(req.ReplyParticipant)) > maxParticipantDigits:
+		return nil, bad("reply_participant is not a phone number")
+	case req.ContentType == ContentReaction:
+		switch {
+		case req.ReplyToID == "":
+			return nil, bad("reply_to_message_id is required for a reaction")
+		case utf8.RuneCountInString(req.Message) > maxReactionRunes:
+			return nil, bad("reaction must be a single emoji")
+		case req.AttachBase64 != "":
+			return nil, bad("a reaction cannot carry an attachment")
+		}
+		return nil, nil // an empty emoji removes the reaction
 	case req.Message == "" && req.AttachBase64 == "":
 		return nil, bad("message or attachment is required")
 	}
@@ -470,6 +574,9 @@ func onlyDigits(s string) string {
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.mu.Lock()
 	m.closed = true
+	if m.stopLostSends != nil {
+		m.stopLostSends() // not yet reported: they stay queued for the next boot
+	}
 	sessions := make([]*Session, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		sessions = append(sessions, s)
@@ -481,13 +588,14 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			s.stopBanTimer()
+			s.stopTimers()
 			if s.queue != nil {
 				s.queue.shutdown(inFlightWait)
 			}
 			if s.cancel != nil {
 				s.cancel()
 			}
+			s.stopTimers() // again: an event may have armed one before cancel
 			if s.client != nil {
 				s.client.Disconnect()
 			}
@@ -618,7 +726,7 @@ func (m *Manager) retire(s *Session) {
 	if s.cancel != nil {
 		s.cancel()
 	}
-	s.stopBanTimer()
+	s.stopTimers()
 	if s.queue != nil {
 		for _, job := range s.queue.shutdown(inFlightWait) {
 			s.finishFailed(job, CodeSessionUnavailable, "session stopped")

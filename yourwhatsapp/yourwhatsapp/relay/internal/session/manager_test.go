@@ -3,8 +3,11 @@ package session
 import (
 	"context"
 	"errors"
+	"net/http"
 	"testing"
 	"time"
+
+	"go.mau.fi/whatsmeow/types"
 
 	"yourwhatsapp/relay/internal/outbox"
 	"yourwhatsapp/relay/internal/store"
@@ -114,20 +117,53 @@ func TestPairCodeRejectsPairedSession(t *testing.T) {
 	}
 }
 
-func TestRestoreFailsQueued(t *testing.T) {
+// captureAfterFunc replaces the manager's timer with one the test fires.
+func captureAfterFunc(h *harness) (delay *time.Duration, fire func()) {
+	var d time.Duration
+	var f func()
+	h.m.afterFunc = func(wait time.Duration, fn func()) func() bool {
+		d, f = wait, fn
+		return func() bool { return true }
+	}
+	return &d, func() { f() }
+}
+
+// Sends lost with the previous process are reported Failed only after the
+// grace period, so restored sessions are back up when Frappe fails over;
+// sends accepted after boot are not touched.
+func TestRestoreFailsQueuedAfterGrace(t *testing.T) {
 	h := newHarness(t)
 	ctx := context.Background()
+	delay, fire := captureAfterFunc(h)
 	if _, err := h.st.ReserveSend(ctx, "m1", "A"); err != nil {
 		t.Fatal(err)
 	}
 	if err := h.m.RestoreAll(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if rec := h.sendRow("m1"); rec.State != store.SendFailed || rec.ErrorCode != store.ErrCodeSendFailed {
-		t.Errorf("row = %+v", rec)
+	h.m.FailLostSendsAfter(30 * time.Second)
+	if *delay != 30*time.Second {
+		t.Errorf("grace = %v", *delay)
+	}
+	if cbs := h.callbacks(outbox.MethodStatus); len(cbs) != 0 {
+		t.Fatalf("callbacks before grace = %v", cbs)
+	}
+	if rec := h.sendRow("m1"); rec.State != store.SendQueued {
+		t.Fatalf("row before grace = %+v", rec)
+	}
+	if _, err := h.st.ReserveSend(ctx, "m2", "A"); err != nil { // accepted after boot
+		t.Fatal(err)
+	}
+
+	fire()
+	if rec := h.sendRow("m1"); rec.State != store.SendFailed || rec.ErrorCode != store.ErrCodeRelayRestarted {
+		t.Errorf("m1 = %+v", rec)
+	}
+	if rec := h.sendRow("m2"); rec.State != store.SendQueued {
+		t.Errorf("m2 = %+v, want untouched", rec)
 	}
 	cbs := h.callbacks(outbox.MethodStatus)
-	if len(cbs) != 1 || cbs[0]["local_message_id"] != "m1" || cbs[0]["status"] != "Failed" || cbs[0]["error_code"] != "send_failed" {
+	if len(cbs) != 1 || cbs[0]["local_message_id"] != "m1" || cbs[0]["status"] != "Failed" || cbs[0]["error_code"] != "relay_restarted" {
 		t.Errorf("callbacks = %v", cbs)
 	}
 }
@@ -177,11 +213,52 @@ func TestPauseAndResume(t *testing.T) {
 	if st, _ := h.m.Start(ctx, "A", nil); st != StatusPaused || h.clientCount() != 1 {
 		t.Errorf("Start on paused = %s, clients = %d", st, h.clientCount())
 	}
-	if err := h.m.Resume(ctx, "A", nil); err != nil {
-		t.Fatal(err)
+	if st, err := h.m.Resume(ctx, "A", nil); err != nil || st != StatusConnecting {
+		t.Fatalf("Resume = %s, %v", st, err)
 	}
 	if h.clientCount() != 2 || h.client(1).connects != 1 {
 		t.Errorf("resume did not reconnect: clients = %d", h.clientCount())
+	}
+}
+
+// Frappe may have missed (or overridden) the Active push; Start and Resume
+// on an already-connected session report connected and push Active again.
+func TestStartAndResumeOnConnectedRepushActive(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.connected("A", testJID)
+	if got := statusPushes(h); len(got) != 1 || got[0] != "Active" {
+		t.Fatalf("pushes after connect = %v", got)
+	}
+	if st, err := h.m.Start(ctx, "A", nil); err != nil || st != StatusConnected {
+		t.Fatalf("Start = %s, %v", st, err)
+	}
+	if st, err := h.m.Resume(ctx, "A", nil); err != nil || st != StatusConnected {
+		t.Fatalf("Resume = %s, %v", st, err)
+	}
+	if got := statusPushes(h); len(got) != 3 || got[1] != "Active" || got[2] != "Active" {
+		t.Errorf("pushes = %v, want Active re-pushed by Start and Resume", got)
+	}
+	if h.clientCount() != 1 {
+		t.Errorf("clients = %d, want the running one kept", h.clientCount())
+	}
+}
+
+func TestLogoutClearsPaused(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	h.connected("A", testJID)
+	if err := h.m.Pause(ctx, "A"); err != nil {
+		t.Fatal(err)
+	}
+	if err := h.m.Logout(ctx, "A"); err != nil {
+		t.Fatal(err)
+	}
+	if acct, _, _ := h.st.GetAccount(ctx, "A"); acct.Paused {
+		t.Error("account still paused after logout")
+	}
+	if st, err := h.m.Start(ctx, "A", nil); err != nil || st != StatusQRPending {
+		t.Errorf("Start after logout = %s, %v; want a fresh QR flow", st, err)
 	}
 }
 
@@ -329,5 +406,38 @@ func TestShutdownDisconnectsAll(t *testing.T) {
 	}
 	if _, err := h.m.Start(ctx, "C", nil); !errors.Is(err, ErrShuttingDown) {
 		t.Errorf("Start after shutdown = %v", err)
+	}
+}
+
+// Frappe (relay_client.SESSION_DOWN) marks an account Disconnected on exactly
+// these 409 details; keep them in step.
+func TestSessionDownDetails(t *testing.T) {
+	h := newHarness(t)
+	ctx := context.Background()
+	// A new session is not_started until its client connects.
+	h.m.setInactive("C", StatusNotStarted, types.EmptyJID)
+	h.connected("A", testJID)
+	if err := h.m.Logout(ctx, "A"); err != nil {
+		t.Fatal(err)
+	}
+	cases := map[string]string{
+		"unknown": "session is not running",
+		"C":       "session is not_started",
+		"A":       "session is logged_out",
+	}
+	for id, want := range cases {
+		serr := h.send(SendRequest{SessionID: id, To: "+919000000001", Message: "hi", LocalID: "m-" + id})
+		if serr == nil || serr.HTTP != http.StatusConflict || serr.Code != CodeSessionUnavailable || serr.Detail != want {
+			t.Errorf("%s: %+v, want 409 %s %q", id, serr, CodeSessionUnavailable, want)
+		}
+	}
+}
+
+func TestConnectedCountsOnlyLiveConnectedSessions(t *testing.T) {
+	h := newHarness(t)
+	h.connected("A", testJID)
+	h.pairedAccount("B", "5511999990000:3@s.whatsapp.net") // linked, not running
+	if n := h.m.Connected(); n != 1 {
+		t.Fatalf("Connected = %d, want 1", n)
 	}
 }

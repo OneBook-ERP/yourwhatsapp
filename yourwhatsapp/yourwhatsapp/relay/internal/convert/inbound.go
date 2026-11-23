@@ -134,11 +134,25 @@ func extractContent(msg *waE2E.Message) (c content, ok bool) {
 	return placeholder("[unsupported]", nil), true
 }
 
-// hasUserContent reports whether anything beyond transport metadata is set.
+// hasUserContent reports whether anything beyond transport metadata and
+// non-chat control messages (poll votes, pins, keep-in-chat, event RSVPs,
+// history notices, key distribution) is set.
 func hasUserContent(msg *waE2E.Message) bool {
 	rest := proto.Clone(msg).(*waE2E.Message)
 	rest.MessageContextInfo = nil
 	rest.SenderKeyDistributionMessage = nil
+	rest.FastRatchetKeySenderKeyDistributionMessage = nil
+	rest.PollUpdateMessage = nil
+	rest.PollAddOptionMessage = nil
+	rest.PinInChatMessage = nil
+	rest.KeepInChatMessage = nil
+	rest.EncEventResponseMessage = nil
+	rest.SecretEncryptedMessage = nil
+	rest.MessageHistoryBundle = nil
+	rest.MessageHistoryNotice = nil
+	rest.StickerSyncRmrMessage = nil
+	rest.GroupRootKeyShare = nil
+	rest.RootSecretDistributeMessage = nil
 	return proto.Size(rest) > 0
 }
 

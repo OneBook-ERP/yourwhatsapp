@@ -2,20 +2,20 @@ from datetime import timedelta
 from unittest.mock import patch
 
 import frappe
-from frappe.tests import IntegrationTestCase
 from frappe.utils import add_to_date, now_datetime
 
 from yourwhatsapp.yourwhatsapp import api
+from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings.whatsapp_settings import write_password
+from yourwhatsapp.yourwhatsapp.tests.utils import LiveSafeTestCase
 
 RELAY_KEY = "test-relay-key"
 FAILOVER_TARGET = "yourwhatsapp.yourwhatsapp.relay_client.handle_async_failure"
 
 
-class TestRelayCallbacks(IntegrationTestCase):
+class TestRelayCallbacks(LiveSafeTestCase):
 	def setUp(self):
-		settings = frappe.get_single("WhatsApp Settings")
-		settings.relay_api_key = RELAY_KEY
-		settings.save(ignore_permissions=True)
+		super().setUp()
+		write_password("relay_api_key", RELAY_KEY)
 
 		key_patch = patch("frappe.get_request_header", return_value=RELAY_KEY)
 		key_patch.start()
@@ -27,9 +27,6 @@ class TestRelayCallbacks(IntegrationTestCase):
 		self.addCleanup(self.enqueue.stop)
 
 		self.account = self._make_account("Relay Test A")
-
-	def tearDown(self):
-		frappe.db.rollback()
 
 	def _make_account(self, name, **fields):
 		return frappe.get_doc(
@@ -51,7 +48,9 @@ class TestRelayCallbacks(IntegrationTestCase):
 		return doc
 
 	def _status(self, name):
-		return frappe.db.get_value("WhatsApp Message", name, ["status", "message_id", "error_reason"], as_dict=True)
+		return frappe.db.get_value(
+			"WhatsApp Message", name, ["status", "message_id", "error_reason"], as_dict=True
+		)
 
 	def _failover_calls(self):
 		return [c for c in self.enqueue_mock.call_args_list if c.args and c.args[0] == FAILOVER_TARGET]
@@ -109,9 +108,61 @@ class TestRelayCallbacks(IntegrationTestCase):
 	def test_unknown_id_noop(self):
 		result = api.message_status(status="Delivered", message_id="NOPE")
 		self.assertFalse(result["ok"])
-		result = api.message_status(status="Failed", local_message_id="does-not-exist", error_code="send_failed")
+		result = api.message_status(
+			status="Failed", local_message_id="does-not-exist", error_code="send_failed"
+		)
 		self.assertFalse(result["ok"])
 		self.assertEqual(self._failover_calls(), [])
+
+	def test_receipt_ignores_incoming_with_same_message_id(self):
+		incoming = self._inbound(message_id="SHARED1")["name"]
+		result = api.message_status(status="Read", message_id="SHARED1")
+		self.assertFalse(result["ok"])
+		self.assertEqual(frappe.db.get_value("WhatsApp Message", incoming, "status"), "Received")
+
+	def test_message_id_is_indexed(self):
+		self.assertTrue(frappe.get_meta("WhatsApp Message").get_field("message_id").search_index)
+		self.assertTrue(frappe.db.get_column_index("tabWhatsApp Message", "message_id"))
+
+	def test_send_unconfirmed_keeps_message_id_without_failover(self):
+		msg = self._make_outgoing()
+		api.message_status(
+			status="Failed",
+			local_message_id=msg.name,
+			message_id="WAID-UNC",
+			error_code="send_unconfirmed",
+			error_reason="send not confirmed by WhatsApp; may have been delivered",
+		)
+		row = self._status(msg.name)
+		self.assertEqual((row.status, row.message_id), ("Failed", "WAID-UNC"))
+		self.assertEqual(self._failover_calls(), [])
+
+		# A later receipt proves delivery and lifts the status.
+		api.message_status(status="Delivered", message_id="WAID-UNC")
+		self.assertEqual(self._status(msg.name).status, "Delivered")
+
+	def test_inbound_media_save_failure_keeps_message(self):
+		from frappe.core.doctype.file.exceptions import MaxFileSizeReachedError
+		from frappe.core.doctype.file.file import File
+
+		def partial_write_then_fail(file_doc, **kwargs):
+			# Anything written before the error must be rolled back.
+			frappe.db.set_value(
+				"WhatsApp Message", file_doc.attached_to_name, "attach", "/private/files/partial"
+			)
+			raise MaxFileSizeReachedError
+
+		with patch.object(File, "save", autospec=True, side_effect=partial_write_then_fail):
+			name = self._inbound(
+				message_id="IN-BIG",
+				content_type="image",
+				media_base64="aGVsbG8=",
+				media_mimetype="image/jpeg",
+			)["name"]
+		row = frappe.db.get_value("WhatsApp Message", name, ["message", "attach"], as_dict=True)
+		self.assertEqual(row.message, "hello\n[attachment could not be saved]")
+		self.assertFalse(row.attach)
+		self.assertFalse(frappe.db.exists("File", {"attached_to_name": name}))
 
 	def test_inbound_dedupe(self):
 		first = self._inbound(message_id="IN1")
@@ -125,6 +176,28 @@ class TestRelayCallbacks(IntegrationTestCase):
 		plain = self._inbound(message_id="IN3")["name"]
 		self.assertEqual(frappe.db.get_value("WhatsApp Message", plain, "is_lid_sender"), 0)
 
+	def test_inbound_as_guest_from_known_lead(self):
+		"""The relay calls as Guest; CRM's hooks must still link and notify the Lead."""
+		if not frappe.db.exists("DocType", "CRM Lead"):
+			self.skipTest("CRM is not installed")
+		lead = frappe.get_doc(
+			{"doctype": "CRM Lead", "first_name": "Guest Test", "mobile_no": "+919999900001"}
+		).insert(ignore_permissions=True)
+		self.addCleanup(frappe.set_user, "Administrator")
+		frappe.set_user("Guest")
+
+		name = api.inbound_message(
+			session_id=self.account.session_id,
+			from_number="919999900001",
+			message="hello",
+			message_id="IN-LEAD",
+		)["name"]
+
+		row = frappe.db.get_value(
+			"WhatsApp Message", name, ["reference_doctype", "reference_name"], as_dict=True
+		)
+		self.assertEqual((row.reference_doctype, row.reference_name), ("CRM Lead", lead.name))
+
 	def test_account_event_temp_banned(self):
 		api.account_event(self.account.session_id, "temp_banned", until="2026-10-31T12:00:00Z")
 		row = frappe.db.get_value(
@@ -132,6 +205,20 @@ class TestRelayCallbacks(IntegrationTestCase):
 		)
 		self.assertEqual(row.status, "RateLimited")
 		self.assertIsNotNone(row.rate_limited_until)
+
+	def test_account_event_client_outdated(self):
+		with patch("frappe.log_error") as log_error:
+			result = api.account_event(self.account.session_id, "client_outdated")
+		self.assertEqual(result, {"ok": True})
+		self.assertEqual(frappe.db.get_value("WhatsApp Account", self.account.name, "status"), "Disconnected")
+		log_error.assert_called_once()
+		self.assertEqual(log_error.call_args.kwargs["title"], "WhatsApp client outdated")
+
+	def test_client_outdated_does_not_override_paused(self):
+		frappe.db.set_value("WhatsApp Account", self.account.name, "status", "Paused")
+		with patch("frappe.log_error"):
+			api.account_event(self.account.session_id, "client_outdated")
+		self.assertEqual(frappe.db.get_value("WhatsApp Account", self.account.name, "status"), "Paused")
 
 	def test_temp_banned_does_not_override_paused(self):
 		frappe.db.set_value("WhatsApp Account", self.account.name, "status", "Paused")
@@ -185,3 +272,9 @@ class TestRelayCallbacks(IntegrationTestCase):
 				api.message_status(status="Sent", message_id="X")
 			with self.assertRaises(frappe.PermissionError):
 				api.account_event(self.account.session_id, "temp_banned")
+
+	def test_ping_verifies_relay_key(self):
+		self.assertEqual(api.ping(), {"ok": True})
+		with patch("frappe.get_request_header", return_value="wrong"):
+			with self.assertRaises(frappe.PermissionError):
+				api.ping()

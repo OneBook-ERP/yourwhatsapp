@@ -61,3 +61,40 @@ func optionalString(s string) *string {
 	}
 	return proto.String(s)
 }
+
+// ReplyContext quotes the message targetID, written by participantJID, with
+// quotedText shown in the quote bubble. No target id means no reply: nil.
+func ReplyContext(targetID, participantJID, quotedText string) *waE2E.ContextInfo {
+	if targetID == "" {
+		return nil
+	}
+	ctx := &waE2E.ContextInfo{StanzaID: proto.String(targetID), Participant: optionalString(participantJID)}
+	if quotedText != "" {
+		ctx.QuotedMessage = &waE2E.Message{Conversation: proto.String(quotedText)}
+	}
+	return ctx
+}
+
+// WithReply attaches a reply context to msg. Plain text becomes extended
+// text, the only text form that carries one. A nil ctx leaves msg as is.
+func WithReply(msg *waE2E.Message, ctx *waE2E.ContextInfo) *waE2E.Message {
+	if ctx == nil {
+		return msg
+	}
+	switch {
+	case msg.Conversation != nil:
+		msg.ExtendedTextMessage = &waE2E.ExtendedTextMessage{Text: msg.Conversation, ContextInfo: ctx}
+		msg.Conversation = nil
+	case msg.ExtendedTextMessage != nil:
+		msg.ExtendedTextMessage.ContextInfo = ctx
+	case msg.ImageMessage != nil:
+		msg.ImageMessage.ContextInfo = ctx
+	case msg.VideoMessage != nil:
+		msg.VideoMessage.ContextInfo = ctx
+	case msg.AudioMessage != nil:
+		msg.AudioMessage.ContextInfo = ctx
+	case msg.DocumentMessage != nil:
+		msg.DocumentMessage.ContextInfo = ctx
+	}
+	return msg
+}

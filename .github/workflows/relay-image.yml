@@ -1,0 +1,88 @@
+name: Relay image
+
+# Builds the Go relay image (yourwhatsapp/yourwhatsapp/relay) and publishes it to
+# GitHub Container Registry, so servers pull it like redis/mariadb:
+#   ghcr.io/<owner>/yourwhatsapp-relay:<tag>
+#
+# - Push a version tag (v1.2.0)  -> build linux/amd64 + linux/arm64 and push
+#   :v1.2.0 and :sha-<short>. Use the SAME tag for yourwhatsapp in apps.json.
+# - Pull request touching relay/ -> build linux/amd64 only (no push), to catch breakage.
+# - Manual run (workflow_dispatch) -> build and push :sha-<short> from the chosen ref.
+#
+# One-time after the first push: GitHub -> org Packages -> yourwhatsapp-relay ->
+# Package settings -> Change visibility -> Public (new packages start private).
+
+on:
+  push:
+    tags:
+      - "v*"
+  pull_request:
+    paths:
+      - "yourwhatsapp/yourwhatsapp/relay/**"
+      - ".github/workflows/relay-image.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+concurrency:
+  group: relay-image-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RELAY_DIR: yourwhatsapp/yourwhatsapp/relay
+
+jobs:
+  image:
+    name: Build relay image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Image name (lowercase owner)
+        id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/yourwhatsapp-relay" >> "$GITHUB_OUTPUT"
+
+      - name: Version shown by the relay (/info, Settings panel)
+        id: version
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            echo "version=$GITHUB_REF_NAME" >> "$GITHUB_OUTPUT"
+          else
+            echo "version=sha-${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GHCR
+        if: github.event_name != 'pull_request'
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ steps.name.outputs.image }}
+          # No :latest on purpose: servers pin an exact version.
+          flavor: latest=false
+          tags: |
+            type=ref,event=tag
+            type=sha,prefix=sha-,format=short
+
+      - name: Build (and push unless pull request)
+        uses: docker/build-push-action@v6
+        with:
+          context: ${{ env.RELAY_DIR }}
+          platforms: ${{ github.event_name == 'pull_request' && 'linux/amd64' || 'linux/amd64,linux/arm64' }}
+          push: ${{ github.event_name != 'pull_request' }}
+          build-args: VERSION=${{ steps.version.outputs.version }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max

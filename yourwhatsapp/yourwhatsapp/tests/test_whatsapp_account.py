@@ -1,8 +1,11 @@
+from typing import ClassVar
 from unittest.mock import MagicMock, patch
 
 import frappe
 import requests
-from frappe.tests import IntegrationTestCase
+
+from yourwhatsapp.yourwhatsapp.doctype.whatsapp_settings.whatsapp_settings import write_password
+from yourwhatsapp.yourwhatsapp.tests.utils import LiveSafeTestCase
 
 RELAY_KEY = "test-relay-key"
 
@@ -15,12 +18,13 @@ def relay_response(status_code=200, body=None):
 	return response
 
 
-class TestWhatsAppAccount(IntegrationTestCase):
+class TestWhatsAppAccount(LiveSafeTestCase):
 	def setUp(self):
+		super().setUp()
 		settings = frappe.get_single("WhatsApp Settings")
 		settings.relay_base_url = "http://relay.test"
-		settings.relay_api_key = RELAY_KEY
 		settings.save(ignore_permissions=True)
+		write_password("relay_api_key", RELAY_KEY)
 		self.account = frappe.get_doc(
 			{
 				"doctype": "WhatsApp Account",
@@ -31,9 +35,6 @@ class TestWhatsAppAccount(IntegrationTestCase):
 			}
 		).insert(ignore_permissions=True)
 
-	def tearDown(self):
-		frappe.db.rollback()
-
 	def test_connect_sends_proxy(self):
 		with patch("requests.post", return_value=relay_response(body={"status": "starting"})) as post:
 			result = self.account.connect()
@@ -43,11 +44,51 @@ class TestWhatsAppAccount(IntegrationTestCase):
 		self.assertEqual(kwargs["json"], {"proxy": "socks5://proxy.test:1080"})
 		self.assertEqual(kwargs["headers"], {"x-api-key": RELAY_KEY})
 
-	def test_connect_sends_null_proxy_when_unset(self):
+	def test_cleared_proxy_sent_as_empty_string(self):
+		# null means "keep the relay's copy"; "" clears it.
 		self.account.proxy = ""
 		with patch("requests.post", return_value=relay_response()) as post:
 			self.account.connect()
-		self.assertEqual(post.call_args.kwargs["json"], {"proxy": None})
+			self.assertEqual(post.call_args.kwargs["json"], {"proxy": ""})
+			self.account.resume()
+			self.assertEqual(post.call_args.kwargs["json"], {"proxy": ""})
+			post.return_value = relay_response(body={"code": "ABCD-1234"})
+			self.account.pair_with_code()
+			self.assertEqual(post.call_args.kwargs["json"], {"phone": "+1 555 000 1111", "proxy": ""})
+
+	def _account_row(self):
+		return frappe.db.get_value(
+			"WhatsApp Account", self.account.name, ["status", "connected_at"], as_dict=True
+		)
+
+	def test_connect_already_connected_sets_active(self):
+		self.account.db_set("status", "Disconnected")
+		with patch("requests.post", return_value=relay_response(body={"status": "connected"})):
+			self.account.connect()
+		row = self._account_row()
+		self.assertEqual(row.status, "Active")
+		self.assertIsNotNone(row.connected_at)
+
+	def test_connect_connected_keeps_paused(self):
+		self.account.db_set("status", "Paused")
+		with patch("requests.post", return_value=relay_response(body={"status": "connected"})):
+			self.account.connect()
+		self.assertEqual(self._account_row().status, "Paused")
+
+	def test_connect_paused_on_relay_throws(self):
+		self.account.db_set("status", "Disconnected")
+		with patch("requests.post", return_value=relay_response(body={"status": "paused"})):
+			with self.assertRaises(frappe.ValidationError) as ctx:
+				self.account.connect()
+		self.assertIn("Account is paused on the relay; use Resume", str(ctx.exception))
+
+	def test_resume_already_connected_sets_active(self):
+		self.account.db_set("status", "Paused")
+		with patch("requests.post", return_value=relay_response(body={"ok": True, "status": "connected"})):
+			self.account.resume()
+		row = self._account_row()
+		self.assertEqual(row.status, "Active")
+		self.assertIsNotNone(row.connected_at)
 
 	def test_pair_with_code_requires_phone(self):
 		self.account.phone_number = ""
@@ -59,14 +100,58 @@ class TestWhatsAppAccount(IntegrationTestCase):
 		with patch("requests.post", return_value=relay_response(body={"code": "ABCD-1234"})) as post:
 			result = self.account.pair_with_code()
 		self.assertEqual(result, {"code": "ABCD-1234"})
-		self.assertEqual(post.call_args.kwargs["json"], {"phone": "+1 555 000 1111", "proxy": "socks5://proxy.test:1080"})
+		self.assertEqual(
+			post.call_args.kwargs["json"], {"phone": "+1 555 000 1111", "proxy": "socks5://proxy.test:1080"}
+		)
 
 	def test_pair_with_code_surfaces_relay_error(self):
-		body = {"error": "already_paired", "detail": "Session is already paired"}
-		with patch("requests.post", return_value=relay_response(409, body)):
+		body = {"error": "invalid_number", "detail": "invalid phone number"}
+		with patch("requests.post", return_value=relay_response(422, body)):
 			with self.assertRaises(frappe.ValidationError) as ctx:
 				self.account.pair_with_code()
-		self.assertIn("Session is already paired", str(ctx.exception))
+		self.assertIn("invalid phone number", str(ctx.exception))
+
+	ALREADY_PAIRED: ClassVar[dict] = {"error": "conflict", "detail": "session is already paired"}
+
+	def _pair_already_paired(self, start_status):
+		responses = [relay_response(409, self.ALREADY_PAIRED), relay_response(body={"status": start_status})]
+		with patch("requests.post", side_effect=responses) as post:
+			result = self.account.pair_with_code()
+		return result, post
+
+	def test_already_paired_connected_sets_active(self):
+		self.account.db_set({"status": "Disconnected", "connected_at": None})
+		errors_before = frappe.db.count("Error Log")
+		result, post = self._pair_already_paired("connected")
+		self.assertTrue(post.call_args.args[0].endswith(f"/session/{self.account.session_id}/start"))
+		self.assertEqual(post.call_args.kwargs["json"], {"proxy": "socks5://proxy.test:1080"})
+		self.assertTrue(result["already_paired"])
+		self.assertIn("already linked", result["message"])
+		self.assertNotIn("code", result)
+		row = self._account_row()
+		self.assertEqual(row.status, "Active")
+		self.assertIsNotNone(row.connected_at)
+		self.assertEqual(frappe.db.count("Error Log"), errors_before)
+
+	def test_already_paired_not_yet_connected_leaves_status(self):
+		self.account.db_set("status", "Disconnected")
+		result, _post = self._pair_already_paired("connecting")
+		self.assertIn("connecting", result["message"])
+		self.assertEqual(self._account_row().status, "Disconnected")
+
+	def test_already_paired_keeps_paused(self):
+		self.account.db_set("status", "Paused")
+		self._pair_already_paired("connected")
+		self.assertEqual(self._account_row().status, "Paused")
+
+	def test_connect_does_not_swallow_conflicts(self):
+		with patch("requests.post", return_value=relay_response(409, self.ALREADY_PAIRED)):
+			self.assertRaises(frappe.ValidationError, self.account.connect)
+
+	def test_relay_paused_conflict_still_throws(self):
+		body = {"error": "conflict", "detail": "session is paused"}
+		with patch("requests.post", return_value=relay_response(409, body)):
+			self.assertRaises(frappe.ValidationError, self.account.pair_with_code)
 
 	def test_relay_unreachable_shows_message(self):
 		with patch("requests.post", side_effect=requests.exceptions.ConnectionError("refused")):
@@ -106,7 +191,12 @@ class TestWhatsAppAccount(IntegrationTestCase):
 
 	def test_non_admin_forbidden(self):
 		with patch("frappe.get_roles", return_value=["Guest"]), patch("requests.post") as post:
-			for method in (self.account.connect, self.account.pair_with_code, self.account.pause,
-				self.account.resume, self.account.logout):
+			for method in (
+				self.account.connect,
+				self.account.pair_with_code,
+				self.account.pause,
+				self.account.resume,
+				self.account.logout,
+			):
 				self.assertRaises(frappe.PermissionError, method)
 		post.assert_not_called()

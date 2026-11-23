@@ -1,0 +1,34 @@
+{
+    "name": "WhatsApp Template Parameter",
+    "module": "Yourwhatsapp",
+    "doctype": "DocType",
+    "engine": "InnoDB",
+    "istable": 1,
+    "editable_grid": 1,
+    "fields": [
+        {
+            "fieldname": "placeholder",
+            "fieldtype": "Int",
+            "label": "Placeholder",
+            "reqd": 1,
+            "in_list_view": 1,
+            "description": "1 for {{1}}, 2 for {{2}}, ..."
+        },
+        {
+            "fieldname": "field",
+            "fieldtype": "Data",
+            "label": "Field",
+            "reqd": 1,
+            "in_list_view": 1,
+            "description": "Fieldname on the reference document, or link_field.target_field to read from the linked document"
+        },
+        {
+            "fieldname": "default_value",
+            "fieldtype": "Data",
+            "label": "Default Value",
+            "in_list_view": 1,
+            "description": "Used when the field is empty"
+        }
+    ],
+    "permissions": []
+}

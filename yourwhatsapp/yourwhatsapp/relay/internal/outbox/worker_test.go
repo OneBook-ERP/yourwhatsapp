@@ -220,12 +220,72 @@ func TestFrappePosterHeaders(t *testing.T) {
 		w.WriteHeader(202)
 	}))
 	defer srv.Close()
-	status, err := NewFrappePoster(srv.URL+"/", "whatsapp.localhost", "secret").Post(context.Background(), MethodQR, []byte(`{"a":1}`))
+	status, err := NewFrappePoster(fixedTarget(srv.URL+"/", "whatsapp.localhost", "secret")).Post(context.Background(), MethodQR, []byte(`{"a":1}`))
 	if err != nil || status != 202 {
 		t.Fatalf("status=%d err=%v", status, err)
 	}
 	if gotPath != "/api/method/yourwhatsapp.yourwhatsapp.api.update_qr" || gotKey != "secret" ||
 		gotHost != "whatsapp.localhost" || gotType != "application/json" || gotBody != `{"a":1}` {
 		t.Errorf("path=%q key=%q host=%q type=%q body=%q", gotPath, gotKey, gotHost, gotType, gotBody)
+	}
+}
+
+// A redirect (e.g. to a login page) must not be followed: the 302 itself is
+// the answer, and Decide dead-letters it.
+func TestFrappePosterDoesNotFollowRedirects(t *testing.T) {
+	var followed bool
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/login" {
+			followed = true
+			w.WriteHeader(200)
+			return
+		}
+		http.Redirect(w, r, "/login", http.StatusFound)
+	}))
+	defer srv.Close()
+	status, err := NewFrappePoster(fixedTarget(srv.URL, "", "secret")).Post(context.Background(), MethodQR, []byte(`{}`))
+	if err != nil || status != http.StatusFound || followed {
+		t.Fatalf("status=%d err=%v followed=%v", status, err, followed)
+	}
+	if action, _ := Decide(status, nil, store.OutboxRow{CreatedAt: time.Now()}, time.Now()); action != ActionDead {
+		t.Errorf("Decide(302) = %v, want dead", action)
+	}
+}
+
+func fixedTarget(url, site, key string) func() (string, string, string) {
+	return func() (string, string, string) { return url, site, key }
+}
+
+// The poster asks for its target on every post, so a claim or key rotation
+// takes effect on the next callback.
+func TestPosterUsesTargetFunc(t *testing.T) {
+	type hit struct{ path, host, key string }
+	var hits []hit
+	srvA := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits = append(hits, hit{"A" + r.URL.Path, r.Host, r.Header.Get("X-Api-Key")})
+		w.WriteHeader(200)
+	}))
+	defer srvA.Close()
+	srvB := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits = append(hits, hit{"B" + r.URL.Path, r.Host, r.Header.Get("X-Api-Key")})
+		w.WriteHeader(200)
+	}))
+	defer srvB.Close()
+
+	url, site, key := srvA.URL, "a.example", "key-a"
+	p := NewFrappePoster(func() (string, string, string) { return url, site, key })
+	if _, err := p.Post(context.Background(), MethodQR, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	url, site, key = srvB.URL+"/", "b.example", "key-b"
+	if _, err := p.Post(context.Background(), MethodStatus, []byte(`{}`)); err != nil {
+		t.Fatal(err)
+	}
+	want := []hit{
+		{"A/api/method/yourwhatsapp.yourwhatsapp.api.update_qr", "a.example", "key-a"},
+		{"B/api/method/yourwhatsapp.yourwhatsapp.api.message_status", "b.example", "key-b"},
+	}
+	if len(hits) != 2 || hits[0] != want[0] || hits[1] != want[1] {
+		t.Fatalf("hits = %+v, want %+v", hits, want)
 	}
 }

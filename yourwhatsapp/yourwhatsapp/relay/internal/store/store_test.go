@@ -18,7 +18,7 @@ func openTemp(t *testing.T) (*Store, string) {
 
 func TestOpenCreatesTables(t *testing.T) {
 	s, dir := openTemp(t)
-	for _, name := range []string{"accounts", "sends", "outbox", "outbox_dead", "whatsmeow_device"} {
+	for _, name := range []string{"accounts", "sends", "outbox", "outbox_dead", "relay_config", "whatsmeow_device"} {
 		var got string
 		err := s.DB.QueryRow(`SELECT name FROM sqlite_master WHERE type='table' AND name=?`, name).Scan(&got)
 		if err != nil {

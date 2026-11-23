@@ -1,11 +1,21 @@
-import requests
 import frappe
+import requests
+from frappe import _
 from frappe.model.document import Document
-from frappe.utils import cint, random_string
+from frappe.utils import random_string
 
+from yourwhatsapp.yourwhatsapp import alerts
 from yourwhatsapp.yourwhatsapp.relay_client import relay_settings
+from yourwhatsapp.yourwhatsapp.routing import (
+	repoint_default_accounts,
+	set_account_active,
+	set_account_status,
+	status_written,
+)
 
 TIMEOUT = 15
+ALREADY_PAIRED = "already_paired"
+ADMIN_HOLDS = ("Paused", "RateLimited")
 
 
 class WhatsAppAccount(Document):
@@ -13,43 +23,88 @@ class WhatsAppAccount(Document):
 		if not self.session_id:
 			self.session_id = f"acc-{random_string(10).lower()}"
 
+	def on_update(self):
+		# An admin editing Status on the form (e.g. a manual RateLimited) is a
+		# status write too: same follow-up as the routing helpers, and silent.
+		before = self.get_doc_before_save()
+		if before and before.status != self.status:
+			status_written(self.name, before.status, self.status, reason="manual")
+
+	def on_trash(self):
+		# Before Frappe's link check, so a Settings default doesn't block the delete.
+		repoint_default_accounts(exclude=self.name)
+		# A later account reusing this name must not inherit its outage state.
+		alerts.clear_alert_keys(self.name)
+
 	@frappe.whitelist()
 	def connect(self):
 		self._check_admin()
-		return self._relay_post("start", {"proxy": self.proxy or None})
+		result = self._relay_post("start", self._proxy_body())
+		alerts.clear_manual(self.name)
+		status = result.get("status")
+		if status == "paused":
+			frappe.throw(_("Account is paused on the relay; use Resume"))
+		if status == "connected":
+			set_account_active(self.name)
+		return result
 
 	@frappe.whitelist()
 	def pair_with_code(self):
 		self._check_admin()
 		if not self.phone_number:
 			frappe.throw("Set the account's phone number before pairing with a code.")
-		result = self._relay_post("pair-code", {"phone": self.phone_number, "proxy": self.proxy or None})
+		result = self._relay_post(
+			"pair-code", {"phone": self.phone_number, **self._proxy_body()}, allow_already_paired=True
+		)
+		if result.get("status") == ALREADY_PAIRED:
+			return self._already_paired()
 		return {"code": result["code"]}
 
 	@frappe.whitelist()
 	def pause(self):
 		self._check_admin()
 		self._relay_post("pause")
-		self.db_set("status", "Paused")
+		set_account_status(self.name, "Paused", reason="manual")
 
 	@frappe.whitelist()
 	def resume(self):
 		self._check_admin()
-		self._relay_post("resume", {"proxy": self.proxy or None})
-		self.db_set("status", "Disconnected")
+		result = self._relay_post("resume", self._proxy_body())
+		alerts.clear_manual(self.name)
+		# An admin resuming lifts their own Paused/ban hold, which the relay may not.
+		if frappe.db.get_value("WhatsApp Account", self.name, "status") in ADMIN_HOLDS:
+			set_account_status(self.name, "Disconnected")
+		if result.get("status") == "connected":
+			set_account_active(self.name)
 
 	@frappe.whitelist()
 	def logout(self):
 		self._check_admin()
 		self._relay_post("logout")
-		self.db_set({"status": "Disconnected", "connected_at": None})
+		set_account_status(self.name, "Disconnected", reason="manual", connected_at=None)
+
+	def _proxy_body(self):
+		# "" clears the relay's stored proxy; null would keep it. A change
+		# applies on the next connect (Pause, then Resume, for a live session).
+		return {"proxy": self.proxy or ""}
+
+	def _already_paired(self):
+		"""The relay already holds a linked device: start it instead of pairing,
+		and only call it Active once the relay says it is connected."""
+		result = self._relay_post("start", self._proxy_body())
+		if result.get("status") == "connected":
+			set_account_active(self.name)
+			message = _("This number is already linked and connected.")
+		else:
+			message = _("This number is already linked; connecting…")
+		return {"already_paired": True, "message": message}
 
 	def _check_admin(self):
 		roles = frappe.get_roles()
 		if "WhatsApp Admin" not in roles and "System Manager" not in roles:
 			frappe.throw("Not permitted to manage a WhatsApp Account.", frappe.PermissionError)
 
-	def _relay_post(self, action, body=None):
+	def _relay_post(self, action, body=None, allow_already_paired=False):
 		base_url, api_key = relay_settings()
 		try:
 			response = requests.post(
@@ -60,23 +115,21 @@ class WhatsAppAccount(Document):
 			)
 		except requests.exceptions.RequestException as exc:
 			frappe.throw(f"Relay not reachable: {exc}")
+		if allow_already_paired and _is_already_paired(response):
+			return {"status": ALREADY_PAIRED}
 		if response.status_code >= 400:
 			frappe.throw(_relay_error_message(response))
 		return response.json()
 
-	def validate(self):
-		self._enforce_single_default("is_default_incoming")
-		self._enforce_single_default("is_default_outgoing")
 
-	def _enforce_single_default(self, fieldname):
-		if not cint(self.get(fieldname)):
-			return
-		others = frappe.get_all(
-			"WhatsApp Account",
-			filters={fieldname: 1, "name": ["!=", self.name]},
-		)
-		for other in others:
-			frappe.db.set_value("WhatsApp Account", other.name, fieldname, 0)
+def _is_already_paired(response):
+	# The relay answers 409 "conflict" both for "already paired" and "paused".
+	if response.status_code != 409:
+		return False
+	try:
+		return "already paired" in (response.json().get("detail") or "")
+	except ValueError:
+		return False
 
 
 def _relay_error_message(response):
@@ -85,4 +138,8 @@ def _relay_error_message(response):
 	except ValueError:
 		body = {}
 	detail = body.get("detail") or body.get("error")
-	return f"Relay error ({response.status_code}): {detail}" if detail else f"Relay error ({response.status_code})"
+	return (
+		f"Relay error ({response.status_code}): {detail}"
+		if detail
+		else f"Relay error ({response.status_code})"
+	)

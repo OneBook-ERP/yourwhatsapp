@@ -13,13 +13,21 @@ import (
 
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waAdv"
+	"go.mau.fi/whatsmeow/proto/waCommon"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	wastore "go.mau.fi/whatsmeow/store"
 	"go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
 
 	"yourwhatsapp/relay/internal/config"
 	"yourwhatsapp/relay/internal/store"
 )
+
+// fakeReaction records one BuildReaction call.
+type fakeReaction struct {
+	chat, sender types.JID
+	id, emoji    string
+}
 
 type fakeSent struct {
 	to  types.JID
@@ -31,6 +39,7 @@ type fakeSent struct {
 type fakeClient struct {
 	mu          sync.Mutex
 	own         types.JID
+	ownLID      types.JID
 	connected   bool
 	handlers    []whatsmeow.EventHandler
 	qr          chan whatsmeow.QRChannelItem
@@ -41,13 +50,18 @@ type fakeClient struct {
 	registered  map[string]types.JID
 	isOnCalls   []string
 	sendErr     error
+	generated   int
+	sendIDs     []types.MessageID // the ID passed to every SendMessage call
 	sent        []fakeSent
+	reactions   []fakeReaction
 	presences   []types.ChatPresence
 	uploads     []whatsmeow.MediaType
 	download    []byte
 	downloadErr error
+	downloads   int
 	pairPhone   string
-	afterSend   func(id string) // run on its own goroutine, like whatsmeow's handler queue
+	afterSend   func(id string)   // run on its own goroutine, like whatsmeow's handler queue
+	connectErr  func(n int) error // n counts Connect calls from 1; non-nil fails that call
 }
 
 func newFakeClient(dev *wastore.Device) *fakeClient {
@@ -61,6 +75,12 @@ func newFakeClient(dev *wastore.Device) *fakeClient {
 func (f *fakeClient) Connect() error {
 	f.mu.Lock()
 	f.connects++
+	if f.connectErr != nil {
+		if err := f.connectErr(f.connects); err != nil {
+			f.mu.Unlock()
+			return err
+		}
+	}
 	f.connected = true
 	qr := f.qr
 	f.mu.Unlock()
@@ -130,14 +150,28 @@ func (f *fakeClient) Upload(_ context.Context, _ []byte, mt whatsmeow.MediaType)
 	return whatsmeow.UploadResponse{URL: "https://mmg.example/x", DirectPath: "/x"}, nil
 }
 
-func (f *fakeClient) SendMessage(_ context.Context, to types.JID, msg *waE2E.Message, _ ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error) {
+func (f *fakeClient) GenerateMessageID() types.MessageID {
 	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.generated++
+	return fmt.Sprintf("WAID-%d", f.generated)
+}
+
+func (f *fakeClient) SendMessage(_ context.Context, to types.JID, msg *waE2E.Message, extra ...whatsmeow.SendRequestExtra) (whatsmeow.SendResponse, error) {
+	f.mu.Lock()
+	var id types.MessageID
+	if len(extra) > 0 {
+		id = extra[0].ID
+	}
+	f.sendIDs = append(f.sendIDs, id)
 	if f.sendErr != nil {
 		f.mu.Unlock()
 		return whatsmeow.SendResponse{}, f.sendErr
 	}
 	f.sent = append(f.sent, fakeSent{to, msg})
-	id := fmt.Sprintf("WAID-%d", len(f.sent))
+	if id == "" {
+		id = fmt.Sprintf("WAID-%d", len(f.sent))
+	}
 	hook := f.afterSend
 	f.mu.Unlock()
 	if hook != nil {
@@ -152,6 +186,16 @@ func (f *fakeClient) SendMessage(_ context.Context, to types.JID, msg *waE2E.Mes
 	return whatsmeow.SendResponse{ID: id}, nil
 }
 
+func (f *fakeClient) BuildReaction(chat, sender types.JID, id types.MessageID, reaction string) *waE2E.Message {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.reactions = append(f.reactions, fakeReaction{chat, sender, id, reaction})
+	return &waE2E.Message{ReactionMessage: &waE2E.ReactionMessage{
+		Key:  &waCommon.MessageKey{RemoteJID: proto.String(chat.String()), ID: proto.String(id)},
+		Text: proto.String(reaction),
+	}}
+}
+
 func (f *fakeClient) SendChatPresence(_ context.Context, _ types.JID, state types.ChatPresence, _ types.ChatPresenceMedia) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -162,6 +206,7 @@ func (f *fakeClient) SendChatPresence(_ context.Context, _ types.JID, state type
 func (f *fakeClient) Download(context.Context, whatsmeow.DownloadableMessage) ([]byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	f.downloads++
 	return f.download, f.downloadErr
 }
 
@@ -185,6 +230,12 @@ func (f *fakeClient) OwnJID() types.JID {
 	return f.own
 }
 
+func (f *fakeClient) OwnLID() types.JID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.ownLID
+}
+
 // emit delivers an event to every handler synchronously.
 func (f *fakeClient) emit(evt any) {
 	f.mu.Lock()
@@ -199,6 +250,12 @@ func (f *fakeClient) sentCount() int {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return len(f.sent)
+}
+
+func (f *fakeClient) sentIDs() []types.MessageID {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]types.MessageID(nil), f.sendIDs...)
 }
 
 func (f *fakeClient) presenceCount() int {

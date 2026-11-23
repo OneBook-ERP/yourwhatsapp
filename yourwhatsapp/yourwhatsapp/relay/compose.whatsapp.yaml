@@ -3,19 +3,26 @@
 # See DEPLOYMENT.md. Never publish the relay port: only Frappe containers may reach it.
 services:
   whatsapp-relay:
-    image: ghcr.io/<org>/yourwhatsapp-relay:<version>
-    # build:
-    #   context: ./apps/yourwhatsapp/yourwhatsapp/yourwhatsapp/relay
+    # Pre-built public image (GitHub Actions, .github/workflows/relay-image.yml), pulled like
+    # redis/mariadb. Set RELAY_VERSION to the same release tag you use for yourwhatsapp in
+    # apps.json (e.g. v1.2.0). Never "latest". RELAY_IMAGE overrides the repository (forks,
+    # mirrors, local test builds such as yourwhatsapp-relay).
+    image: ${RELAY_IMAGE:-ghcr.io/onebook-erp/yourwhatsapp-relay}:${RELAY_VERSION:?set RELAY_VERSION to a yourwhatsapp release tag, e.g. v1.2.0}
     restart: unless-stopped
     stop_grace_period: 30s
     environment:
-      # Frappe's internal address as seen from this container (frappe_docker: the frontend service).
-      FRAPPE_BASE_URL: http://frontend:8080
-      # Site name, sent as the Host header so the callback reaches the right site.
-      FRAPPE_SITE_NAME: ${SITE_NAME:?set SITE_NAME}
-      # Must equal WhatsApp Settings.relay_api_key on the site.
-      RELAY_API_KEY: ${RELAY_API_KEY:?set RELAY_API_KEY}
+      # The relay boots unclaimed and is claimed from WhatsApp Settings -> Connect Relay.
+      # Required in production: a bootstrap token, so only someone holding it can claim the relay.
+      # Generate: python3 -c "import secrets;print(secrets.token_urlsafe(32))"
+      RELAY_BOOTSTRAP_TOKEN: ${RELAY_BOOTSTRAP_TOKEN:-}
       RELAY_HOST: 0.0.0.0
+      # Optional fallbacks, used only in env mode (RELAY_API_KEY set). A claimed relay
+      # takes its callback URL and Host from the claim instead.
+      # FRAPPE_BASE_URL: http://frontend:8080
+      # FRAPPE_SITE_NAME: ${SITE_NAME}
+      # Legacy/env mode: pins the key in env and disables claiming (must equal
+      # WhatsApp Settings.relay_api_key).
+      # RELAY_API_KEY: ${RELAY_API_KEY:?set RELAY_API_KEY}
     volumes:
       - whatsapp-relay-data:/data
 

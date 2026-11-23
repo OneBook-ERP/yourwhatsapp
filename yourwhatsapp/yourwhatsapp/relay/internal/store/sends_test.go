@@ -137,3 +137,19 @@ func TestGetSend(t *testing.T) {
 		t.Fatalf("GetSend = %+v, %v", rec, err)
 	}
 }
+
+func TestMarkUnconfirmedKeepsMessageID(t *testing.T) {
+	s, _ := openTemp(t)
+	ctx := context.Background()
+	mustReserve(t, s, "m1", "A")
+	if ok, err := s.MarkUnconfirmed(ctx, "m1", "B", "WAID"); err != nil || ok {
+		t.Fatalf("MarkUnconfirmed from another session = %v, %v; want false", ok, err)
+	}
+	if ok, err := s.MarkUnconfirmed(ctx, "m1", "A", "WAID"); err != nil || !ok {
+		t.Fatalf("MarkUnconfirmed = %v, %v", ok, err)
+	}
+	got := getSend(t, s, "m1")
+	if got.State != SendFailed || got.ErrorCode != ErrCodeSendUnconfirmed || got.MessageID != "WAID" {
+		t.Fatalf("row = %+v", got)
+	}
+}

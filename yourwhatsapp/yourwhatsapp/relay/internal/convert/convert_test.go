@@ -187,6 +187,29 @@ func TestInboundDropsProtocolEditAndEmpty(t *testing.T) {
 	}
 }
 
+// Poll votes, pins, keep-in-chat and similar control messages are not chat
+// content: they are dropped instead of arriving as "[unsupported]".
+func TestInboundDropsControlMessages(t *testing.T) {
+	cases := map[string]*waE2E.Message{
+		"poll vote":      {PollUpdateMessage: &waE2E.PollUpdateMessage{}},
+		"pin":            {PinInChatMessage: &waE2E.PinInChatMessage{}},
+		"keep in chat":   {KeepInChatMessage: &waE2E.KeepInChatMessage{}},
+		"event response": {EncEventResponseMessage: &waE2E.EncEventResponseMessage{}},
+		"poll add":       {PollAddOptionMessage: &waE2E.PollAddOptionMessage{}},
+		"secret edit":    {SecretEncryptedMessage: &waE2E.SecretEncryptedMessage{}},
+		"history notice": {MessageHistoryNotice: &waE2E.MessageHistoryNotice{}},
+		"vote with context": {
+			PollUpdateMessage:  &waE2E.PollUpdateMessage{},
+			MessageContextInfo: &waE2E.MessageContextInfo{},
+		},
+	}
+	for name, m := range cases {
+		if p, _, ok := Inbound("s1", msgEvt(pn("1"), m), noResolve); ok {
+			t.Errorf("%s: expected drop, got %+v", name, p)
+		}
+	}
+}
+
 func TestReceiptStatus(t *testing.T) {
 	cases := []struct {
 		in     types.ReceiptType
@@ -195,7 +218,7 @@ func TestReceiptStatus(t *testing.T) {
 	}{
 		{types.ReceiptTypeDelivered, "Delivered", true},
 		{types.ReceiptTypeRead, "Read", true},
-		{types.ReceiptTypeReadSelf, "Read", true},
+		{types.ReceiptTypeReadSelf, "", false}, // our own other device read an incoming message
 		{types.ReceiptTypePlayed, "Read", true},
 		{types.ReceiptTypeSender, "", false},
 		{types.ReceiptTypeRetry, "", false},
@@ -268,5 +291,55 @@ func TestInboundLIDNilResolver(t *testing.T) {
 	p, _, ok := Inbound("s1", msgEvt(lid("999"), &waE2E.Message{Conversation: proto.String("hi")}), nil)
 	if !ok || p.FromNumber != "999" || !p.FromLID {
 		t.Fatalf("ok=%v %+v", ok, p)
+	}
+}
+
+func TestReplyContextText(t *testing.T) {
+	ctx := ReplyContext("TARGET1", "919000000001@s.whatsapp.net", "original question")
+	if ctx.GetStanzaID() != "TARGET1" || ctx.GetParticipant() != "919000000001@s.whatsapp.net" ||
+		ctx.GetQuotedMessage().GetConversation() != "original question" {
+		t.Fatalf("context = %v", ctx)
+	}
+	m := WithReply(TextMessage("the answer"), ctx)
+	if m.Conversation != nil {
+		t.Fatalf("reply kept the plain conversation field: %v", m)
+	}
+	ext := m.GetExtendedTextMessage()
+	if ext.GetText() != "the answer" || ext.GetContextInfo() != ctx {
+		t.Fatalf("extended text = %v", ext)
+	}
+}
+
+func TestReplyContextMedia(t *testing.T) {
+	ctx := ReplyContext("TARGET1", "1@s.whatsapp.net", "[image]")
+	up := whatsmeow.UploadResponse{URL: "u", DirectPath: "/p"}
+	for _, ct := range []string{"image", "video", "audio", "document"} {
+		m := WithReply(BuildMediaMessage(ct, "cap", "x/y", "f.bin", up), ctx)
+		var got *waE2E.ContextInfo
+		switch ct {
+		case "image":
+			got = m.GetImageMessage().GetContextInfo()
+		case "video":
+			got = m.GetVideoMessage().GetContextInfo()
+		case "audio":
+			got = m.GetAudioMessage().GetContextInfo()
+		case "document":
+			got = m.GetDocumentMessage().GetContextInfo()
+		}
+		if got != ctx {
+			t.Errorf("%s: context = %v", ct, got)
+		}
+	}
+}
+
+func TestReplyContextIgnoresMissingFields(t *testing.T) {
+	if ctx := ReplyContext("", "1@s.whatsapp.net", "x"); ctx != nil {
+		t.Fatalf("no target id must mean no reply context, got %v", ctx)
+	}
+	if m := WithReply(TextMessage("plain"), nil); m.GetConversation() != "plain" || m.ExtendedTextMessage != nil {
+		t.Fatalf("nil context changed the message: %v", m)
+	}
+	if ctx := ReplyContext("T", "1@s.whatsapp.net", ""); ctx.GetStanzaID() != "T" || ctx.QuotedMessage != nil {
+		t.Fatalf("empty quoted text: %v", ctx)
 	}
 }
