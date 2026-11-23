@@ -170,6 +170,23 @@ class TestRelayCallbacks(LiveSafeTestCase):
 		plain = self._inbound(message_id="IN3")["name"]
 		self.assertEqual(frappe.db.get_value("WhatsApp Message", plain, "is_lid_sender"), 0)
 
+	def test_inbound_as_guest_from_known_lead(self):
+		"""The relay calls as Guest; CRM's hooks must still link and notify the Lead."""
+		if not frappe.db.exists("DocType", "CRM Lead"):
+			self.skipTest("CRM is not installed")
+		lead = frappe.get_doc(
+			{"doctype": "CRM Lead", "first_name": "Guest Test", "mobile_no": "+919999900001"}
+		).insert(ignore_permissions=True)
+		self.addCleanup(frappe.set_user, "Administrator")
+		frappe.set_user("Guest")
+
+		name = api.inbound_message(
+			session_id=self.account.session_id, from_number="919999900001", message="hello", message_id="IN-LEAD"
+		)["name"]
+
+		row = frappe.db.get_value("WhatsApp Message", name, ["reference_doctype", "reference_name"], as_dict=True)
+		self.assertEqual((row.reference_doctype, row.reference_name), ("CRM Lead", lead.name))
+
 	def test_account_event_temp_banned(self):
 		api.account_event(self.account.session_id, "temp_banned", until="2026-10-31T12:00:00Z")
 		row = frappe.db.get_value(

@@ -60,6 +60,8 @@ def inbound_message(
 	from_lid: bool = False,
 ):
 	_verify_relay_key()
+	# CRM's save hooks permission-check the linked Lead, which a Guest cannot read.
+	frappe.set_user("Administrator")
 
 	account = frappe.db.get_value("WhatsApp Account", {"session_id": session_id}, "name")
 	if not account:
