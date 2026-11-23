@@ -31,11 +31,11 @@ In frappe_docker, list the apps in `apps.json`. Use the branch you deploy.
 ```
 
 ```bash
-export APPS_JSON_BASE64=$(base64 -w 0 apps.json)
-docker build --build-arg=APPS_JSON_BASE64=$APPS_JSON_BASE64 ... -t <your-frappe-image> .
+docker build --build-arg=FRAPPE_PATH=https://github.com/frappe/frappe --build-arg=FRAPPE_BRANCH=version-16 \
+  --secret=id=apps_json,src=apps.json -t <your-frappe-image> --file=images/layered/Containerfile .
 ```
 
-Check the exact build command and the app branches against your frappe_docker version.
+`apps.json` is a BuildKit secret, not a build argument. Build gotchas (IPv6 hang, Apple-silicon platform pin, local image tags) are in `DEPLOYMENT.md` section 1.
 
 ### 2. Build the relay image
 

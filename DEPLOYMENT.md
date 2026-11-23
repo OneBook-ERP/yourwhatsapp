@@ -1,6 +1,6 @@
 # Deploying yourwhatsapp (Docker)
 
-Production runs two things: your Frappe stack (built from [frappe_docker](https://github.com/frappe/frappe_docker)) with the `yourwhatsapp` app installed, and the Go relay as its own container next to it. This is an internal ops tool, not approved by Meta/WhatsApp. The Docker files were written without Docker available on the dev host: treat the first deploy as the first test.
+Production runs two things: your Frappe stack (built from [frappe_docker](https://github.com/frappe/frappe_docker)) with the `yourwhatsapp` app installed, and the Go relay as its own container next to it. This is an internal ops tool, not approved by Meta/WhatsApp. The Docker files were staged end to end on 2026-11-23: the relay image built for amd64 and arm64, and the full stack (MariaDB, Redis, Frappe, CRM, relay, a real linked number) ran on an arm64 host. Not yet exercised: the amd64 Frappe image, pairing by phone-number code, and the alert after a device is unlinked from the phone.
 
 ## 1. Build the Frappe image with yourwhatsapp
 
@@ -14,11 +14,18 @@ Add the app to the `apps.json` you feed to frappe_docker's image build:
 ```
 
 ```bash
-export APPS_JSON_BASE64=$(base64 -w 0 apps.json)
-docker build --build-arg=APPS_JSON_BASE64=$APPS_JSON_BASE64 \
+docker build \
+  --build-arg=FRAPPE_PATH=https://github.com/frappe/frappe \
   --build-arg=FRAPPE_BRANCH=version-16 \
+  --secret=id=apps_json,src=apps.json \
   --tag=<registry>/frappe-crm:<version> --file=images/layered/Containerfile .
 ```
+
+`apps.json` goes in as a BuildKit secret: the current frappe_docker ignores the old `APPS_JSON_BASE64` build argument. Build notes from the staging run:
+
+- If the build sits silent after `Updated frappe/gunicorn` during `bench init`, the build container has no IPv6 route but DNS returns IPv6 addresses first. Make glibc prefer IPv4 in a copy of the Containerfile (as root before `bench init`: `printf 'precedence ::ffff:0:0/96 100\n' > /etc/gai.conf`) and build from that copy.
+- frappe_docker's `compose.yaml` pins every Frappe service to `linux/amd64`. On an Apple-silicon host build with `--platform linux/arm64` and override `platform` per service in a local compose file; production on x86 needs neither.
+- For a locally built image set `CUSTOM_IMAGE`, `CUSTOM_TAG` and `PULL_POLICY=never`, otherwise compose tries to pull it (`pull_policy: always`).
 
 Then `bench --site <site> install-app yourwhatsapp` (frappe_docker: `docker compose exec backend bench --site <site> install-app yourwhatsapp`). If your host cannot add containers (e.g. Frappe Cloud), see section 9.
 
@@ -50,6 +57,7 @@ docker compose -f compose.yaml -f overrides/compose.mariadb.yaml -f overrides/co
 - No ports are published. Only containers on the compose network (your Frappe services) reach the relay. Never expose port 8800 to the internet: with the key, anyone can send messages as your numbers.
 - `stop_grace_period: 30s` lets the relay close WhatsApp sessions cleanly. Do not shorten it, and avoid `docker kill` on a live relay: repeated abrupt disconnects can get a device unlinked.
 - Run exactly one relay per data volume.
+- While Frappe is unreachable (a deploy, a restart) the relay keeps inbound messages and status updates in its on-disk outbox and retries with growing backoff, so delivery can lag a few minutes after Frappe is back and nothing is lost. Held inbound messages are not logged one by one: read the pending count in Test Connection or the Relay Status panel.
 - `MEDIA_MAX_BYTES` (default 15 MiB) caps inbound attachments; bigger ones arrive as a text note. The relay logs the effective value at startup (`relay config`, `media_max_bytes`). It must fit through every limit in the chain below.
 - The relay runs as uid 65532 (distroless nonroot). A fresh named volume inherits the right ownership from the image; a bind mount or a pre-existing volume needs a host-side `chown -R 65532:65532 <path>` or the relay cannot open `relay.db` and crashes on start.
 
